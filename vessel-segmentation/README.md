@@ -1,11 +1,13 @@
 # Vessel Segmentation in PyTorch
 
-This repository trains and evaluates a patch-based ResUNet for vessel segmentation from explicit on-disk dataset splits. The workflow now supports:
+This folder contains the vessel segmentation stage of the Sequential Angiography monorepo. It trains and evaluates a patch-based ResUNet from explicit on-disk dataset splits, and it can generate stenosis-compatible vessel masks for extracted angiography keyframes.
+
+The workflow supports:
 
 - retinal training from scratch with real FOV masks
 - coronary fine-tuning from a retinal checkpoint
-- explicit `train` / `val` / `test` splits only
-- no HDF5 conversion, hidden validation split, or legacy mixed-dataset path
+- explicit `train` / `val` / `test` splits
+- mirrored mask generation for the stenosis detection stage
 
 ## Project Structure
 
@@ -15,7 +17,6 @@ This repository trains and evaluates a patch-based ResUNet for vessel segmentati
 |-- predict.py
 |-- validate_dataset.py
 |-- segment_retinal_images.py
-|-- requirements.txt
 `-- src
     `-- drive_seg
         |-- augmentations.py
@@ -90,8 +91,14 @@ Datasets/
 
 ## Installation
 
+Install dependencies and the monorepo package from the repository root:
+
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Validate a Dataset Root
@@ -223,7 +230,7 @@ For ad hoc retinal images without masks:
 python segment_retinal_images.py --input path/to/retinal_images --checkpoint checkpoints/retinal_best.pt
 ```
 
-For stenosis-repo batch compatibility, write mirrored binary masks named
+For stenosis detection batch compatibility, write mirrored binary masks named
 `<image_stem>_mask.png` under a separate mask root:
 
 ```bash
@@ -236,18 +243,19 @@ python segment_retinal_images.py \
 If the input contains `data/case_root/study_a/series_b/slice_0001.png`, this produces
 `outputs/stenosis_masks/study_a/series_b/slice_0001_mask.png`.
 
-You can then use the same segmentation input tree as the stenosis repo `--images-root`
-and the mirrored mask tree as `--masks-root`:
+You can then use the same segmentation input tree with the `stenosis-detection`
+CLI `--images-root` and the mirrored mask tree as `--masks-root`:
 
 ```bash
-python path/to/stenosis_repo_batch_entry.py \
+python ../stenosis-detection/run_stenosis_detection.py \
   --images-root data/case_root \
-  --masks-root outputs/stenosis_masks
+  --masks-root outputs/stenosis_masks \
+  --output-root outputs/stenosis_results
 ```
 
 ## Notes
 
-- The package name remains `drive_seg`, but the dataset flow is now generic to explicit split-based vessel datasets.
+- The package name is `drive_seg`.
 - Checkpoints store model config, patch geometry, training config, and initialization metadata.
 - The recommended workflow is retinal training first, then coronary fine-tuning from `--init-checkpoint`.
 - Use `--resume-checkpoint` only when you want to continue the same training run, not for transfer learning.

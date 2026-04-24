@@ -1,16 +1,12 @@
 # Coronary Angiogram Keyframes Extraction
 
-This repository is now organized as a Python package instead of a notebook-driven project.
-
-The original extraction notebook has been migrated into importable modules under `src/`, so there is one maintained code path and no notebook-specific runtime logic left behind.
+This folder contains the keyframe extraction stage of the Sequential Angiography monorepo. The importable package is `angio_keyframes`, and the compatibility script `keyframes_extraction.py` is kept for direct subproject use.
 
 ## Project layout
 
 ```text
 .
 |-- keyframes_extraction.py
-|-- pyproject.toml
-|-- requirements.txt
 |-- src/
 |   `-- angio_keyframes/
 |       |-- __init__.py
@@ -23,8 +19,7 @@ The original extraction notebook has been migrated into importable modules under
 |       `-- pipeline.py
 |-- tests/
 |   `-- test_pipeline.py
-|-- oneSampleCORO/
-`-- all_dataSet_50_videos/
+`-- README.md
 ```
 
 ## Extraction logic
@@ -44,45 +39,47 @@ The default is `6` keyframes per sequence, the default baseline uses the first `
 
 ## Installation
 
-Create a virtual environment and install the runtime dependencies:
+Install dependencies and the monorepo package from the repository root:
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-If you want the package import path and console script available in the environment, install the project in editable mode:
-
-```bash
 pip install -e .
 ```
 
 ## Usage
 
-Run the compatibility entrypoint from the repo root:
+Run the root wrapper from the repository root:
 
 ```bash
-python keyframes_extraction.py all_dataSet_50_videos --backend cpu --output-root extracted_keyframes --overwrite
+python scripts/run_keyframes.py data/raw_cases --backend cpu --output-root work/keyframes --overwrite
+```
+
+Run the compatibility entrypoint from this subproject folder:
+
+```bash
+cd keyframes-extraction
+python keyframes_extraction.py ../data/raw_cases --backend cpu --output-root ../work/keyframes --overwrite
 ```
 
 After `pip install -e .`, run the package directly:
 
 ```bash
-python -m angio_keyframes all_dataSet_50_videos --backend cpu --output-root extracted_keyframes --overwrite
+python -m angio_keyframes data/raw_cases --backend cpu --output-root work/keyframes --overwrite
 ```
 
 You can also use the installed console script:
 
 ```bash
-angio-keyframes all_dataSet_50_videos --backend cpu --output-root extracted_keyframes --overwrite
+angio-keyframes data/raw_cases --backend cpu --output-root work/keyframes --overwrite
 ```
 
 CUDA example:
 
 ```bash
-angio-keyframes all_dataSet_50_videos --backend cuda --output-root extracted_keyframes_cuda --overwrite
+angio-keyframes data/raw_cases --backend cuda --output-root work/keyframes_cuda --overwrite
 ```
 
 Useful flags:
@@ -102,7 +99,7 @@ Useful flags:
 Run the test suite with:
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover keyframes-extraction/tests
 ```
 
 ## Performance
@@ -126,4 +123,3 @@ python -m unittest discover -s tests
 - When the input path is a dataset root, every nested directory that contains supported image files is treated as a sequence and written directly into the mirrored output tree as `<output-root>/<relative-sequence-path>`.
 - Marker images such as `.extract_complete.png` are ignored during discovery, scoring, and output writing.
 - `--overwrite` and `--skip-existing` are mutually exclusive output modes.
-- The dataset directories under `all_dataSet_50_videos/` are preserved as project assets. The package code lives only under `src/`.

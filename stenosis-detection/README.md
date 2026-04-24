@@ -1,6 +1,8 @@
 # Python Stenosis Detection
 
-Python pipeline for detecting vessel stenosis from angiography images and binary vessel masks.
+This folder contains the stenosis detection and fusion stage of the Sequential Angiography monorepo. The importable package is `stenosis_detection`.
+
+The pipeline detects vessel stenosis from angiography images and binary vessel masks.
 
 The project supports:
 
@@ -9,8 +11,14 @@ The project supports:
 
 ## Installation
 
+Install dependencies and the monorepo package from the repository root:
+
 ```bash
-python -m pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Batch Processing
@@ -345,7 +353,6 @@ The detection flow includes:
 - `run_stenosis_detection.py`
 - `run_temporal_fusion.py`
 - `run_multiview_fusion.py`
-- `requirements.txt`
 - `stenosis_detection/__init__.py`
 - `stenosis_detection/__main__.py`
 - `stenosis_detection/batch.py`

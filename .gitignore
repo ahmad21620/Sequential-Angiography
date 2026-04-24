@@ -1,0 +1,72 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment files
+/.venv/
+/venv/
+/env/
+.env
+.env.*
+
+# Checkpoints and generated outputs
+*.ckpt
+*.pth
+*.pt
+/checkpoints/
+/outputs/
+/runs/
+/logs/
+/keyframes-extraction/checkpoints/
+/keyframes-extraction/outputs/
+/keyframes-extraction/extracted_keyframes*/
+/keyframes-extraction/*_keyFrames/
+/vessel-segmentation/checkpoints/
+/vessel-segmentation/outputs/
+/stenosis-detection/checkpoints/
+/stenosis-detection/outputs/
+/stenosis-detection/output_root/
+/stenosis-detection/temporal_output_root/
+
+# Datasets and large local work areas
+/data/
+/datasets/
+/Datasets/
+/work/
+/tmp/
+/temp/
+/keyframes-extraction/data/
+/keyframes-extraction/datasets/
+/keyframes-extraction/Datasets/
+/vessel-segmentation/data/
+/vessel-segmentation/datasets/
+/vessel-segmentation/Datasets/
+/stenosis-detection/data/
+/stenosis-detection/datasets/
+/stenosis-detection/Datasets/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/

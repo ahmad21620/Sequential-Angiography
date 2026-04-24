@@ -1,7 +1,0 @@
-matplotlib
-numpy
-opencv-python
-Pillow
-scikit-learn
-torch
-tqdm

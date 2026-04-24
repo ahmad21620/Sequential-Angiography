@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sequential-angiography"
+version = "0.1.0"
+description = "Sequential angiography pipeline for keyframe extraction, vessel segmentation, and stenosis detection."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+angio-keyframes = "angio_keyframes.cli:main"
+stenosis-detection = "stenosis_detection.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+angio_keyframes = "keyframes-extraction/src/angio_keyframes"
+drive_seg = "vessel-segmentation/src/drive_seg"
+stenosis_detection = "stenosis-detection/stenosis_detection"
+
+[tool.setuptools.packages.find]
+where = [
+    "keyframes-extraction/src",
+    "vessel-segmentation/src",
+    "stenosis-detection",
+]
+include = [
+    "angio_keyframes*",
+    "drive_seg*",
+    "stenosis_detection*",
+]
