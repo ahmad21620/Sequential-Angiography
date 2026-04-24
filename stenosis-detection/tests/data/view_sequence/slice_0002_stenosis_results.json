@@ -1,0 +1,30 @@
+{
+  "image_path": "Input_Original\\slice_0002.png",
+  "mask_path": "Input_Mask\\slice_0002_mask.png",
+  "frame": {
+    "image_name": "slice_0002.png",
+    "image_stem": "slice_0002",
+    "frame_index": 2,
+    "view_id": "study/series_a",
+    "width": 600,
+    "height": 800
+  },
+  "counts": {
+    "skeleton_points": 4,
+    "stenosis_points": 1
+  },
+  "skeleton_points": [
+    [1, 1],
+    [2, 1],
+    [3, 1],
+    [4, 1]
+  ],
+  "stenosis_points": [
+    {
+      "x": 2,
+      "y": 2,
+      "degree": 0.6,
+      "severity": "moderate"
+    }
+  ]
+}

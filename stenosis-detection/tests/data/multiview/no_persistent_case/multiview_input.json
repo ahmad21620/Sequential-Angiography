@@ -1,0 +1,19 @@
+{
+  "case_id": "case_no_persistent",
+  "views": [
+    {
+      "view_id": "view_01",
+      "sequence_id": "seq_01",
+      "rao_lao": 20,
+      "cra_cau": -5,
+      "temporal_fusion_json": "outputs/case_no_persistent/view_01_temporal_fusion.json"
+    },
+    {
+      "view_id": "view_02",
+      "sequence_id": "seq_02",
+      "rao_lao": -40,
+      "cra_cau": 15,
+      "temporal_fusion_json": "outputs/case_no_persistent/view_02_temporal_fusion.json"
+    }
+  ]
+}

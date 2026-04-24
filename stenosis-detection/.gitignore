@@ -1,0 +1,35 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Output directories
+outputs/
+!tests/data/multiview/**/outputs/
+!tests/data/multiview/**/outputs/**/*.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+
+# Temporary MATLAB artifacts from older versions of the repo
+*.asv
+*.autosave
+*.m~
+*.mlx~
+slprj/
+codegen/
+
+Input/
+Output/
+.history/
+
+Output_FrameV2/
+Output_Temporal/

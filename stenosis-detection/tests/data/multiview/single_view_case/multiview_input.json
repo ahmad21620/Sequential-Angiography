@@ -1,0 +1,12 @@
+{
+  "case_id": "case_single_view",
+  "views": [
+    {
+      "view_id": "view_01",
+      "sequence_id": "seq_01",
+      "rao_lao": 30,
+      "cra_cau": -10,
+      "temporal_fusion_json": "outputs/case_single_view/view_01_temporal_fusion.json"
+    }
+  ]
+}

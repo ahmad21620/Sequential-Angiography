@@ -1,0 +1,47 @@
+{
+  "view_id": "view_02",
+  "final_lesion": {
+    "lesion_id": 1,
+    "track_id": 20,
+    "severity": "moderate",
+    "supporting_frame_count": 4,
+    "total_frame_count": 5,
+    "persistence_ratio": 0.8,
+    "frame_indices": [1, 2, 3, 4],
+    "degrees": {
+      "median": 0.7,
+      "max": 0.77
+    },
+    "stability": {
+      "degree_std": 0.02,
+      "max_frame_gap": 1
+    },
+    "positions": {
+      "median_centerline_position": 0.45,
+      "dominant_centerline_component_id": 3
+    }
+  },
+  "persistent_lesions": [
+    {
+      "lesion_id": 1,
+      "track_id": 20,
+      "severity": "moderate",
+      "supporting_frame_count": 4,
+      "total_frame_count": 5,
+      "persistence_ratio": 0.8,
+      "frame_indices": [1, 2, 3, 4],
+      "degrees": {
+        "median": 0.7,
+        "max": 0.77
+      },
+      "stability": {
+        "degree_std": 0.02,
+        "max_frame_gap": 1
+      },
+      "positions": {
+        "median_centerline_position": 0.45,
+        "dominant_centerline_component_id": 3
+      }
+    }
+  ]
+}
