@@ -21,6 +21,7 @@ from angio_keyframes.images import list_image_files, load_grayscale_image, write
 from angio_keyframes.models import ExtractionResult, KeyframeCandidate
 
 ExtractionJob = tuple[BackendName, Path, Path, int, int, int, bool, bool]
+PATIENT_METADATA_FILENAMES = ("views.json", "patient.json")
 
 
 def smooth_score_curve(scores: np.ndarray, smoothing_window: int) -> np.ndarray:
@@ -70,15 +71,20 @@ def resolve_output_root(input_path: Path, output_root: Path | None) -> Path:
     return input_path.parent / f"{input_path.name}_keyFrames"
 
 
-def copy_patient_views_json(input_path: Path, output_root: Path, input_is_image_folder: bool) -> None:
+def copy_patient_metadata_files(input_path: Path, output_root: Path, input_is_image_folder: bool) -> None:
     if input_is_image_folder:
         return
 
-    for views_path in input_path.glob("*/views.json"):
-        relative_views_path = views_path.relative_to(input_path)
-        destination_path = output_root / relative_views_path
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(views_path, destination_path)
+    for metadata_filename in PATIENT_METADATA_FILENAMES:
+        for metadata_path in input_path.glob(f"*/{metadata_filename}"):
+            relative_metadata_path = metadata_path.relative_to(input_path)
+            destination_path = output_root / relative_metadata_path
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(metadata_path, destination_path)
+
+
+def copy_patient_views_json(input_path: Path, output_root: Path, input_is_image_folder: bool) -> None:
+    copy_patient_metadata_files(input_path, output_root, input_is_image_folder)
 
 
 def resolve_sequence_output_dir(
@@ -205,7 +211,7 @@ def extract_keyframes_from_root(
 
     input_is_image_folder = bool(list_image_files(input_path))
     resolved_output_root = resolve_output_root(input_path, output_root)
-    copy_patient_views_json(input_path, resolved_output_root, input_is_image_folder)
+    copy_patient_metadata_files(input_path, resolved_output_root, input_is_image_folder)
     jobs: list[ExtractionJob] = [
         (
             backend,

@@ -406,7 +406,7 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((expected_output_dir / ".extract_complete.png").exists())
             self.assertEqual(len(list(expected_output_dir.iterdir())), 3)
 
-    def test_extract_keyframes_from_root_copies_patient_views_json(self) -> None:
+    def test_extract_keyframes_from_root_copies_patient_metadata_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             dataset_root = Path(temp_dir) / "dataset"
             patient_dir = dataset_root / "Patient_1"
@@ -415,6 +415,8 @@ class PipelineTests(unittest.TestCase):
             frames_dir.mkdir(parents=True)
             views_path = patient_dir / "views.json"
             views_path.write_text('{"view":"LAO"}', encoding="utf-8")
+            patient_path = patient_dir / "patient.json"
+            patient_path.write_text('{"patient_id":"Patient_1"}', encoding="utf-8")
 
             for index in range(4):
                 image = np.full((16, 16, 3), 180, dtype=np.uint8)
@@ -429,6 +431,12 @@ class PipelineTests(unittest.TestCase):
             mirrored_views_path = output_root / "Patient_1" / "views.json"
             self.assertTrue(mirrored_views_path.is_file())
             self.assertEqual(mirrored_views_path.read_text(encoding="utf-8"), '{"view":"LAO"}')
+            mirrored_patient_path = output_root / "Patient_1" / "patient.json"
+            self.assertTrue(mirrored_patient_path.is_file())
+            self.assertEqual(
+                mirrored_patient_path.read_text(encoding="utf-8"),
+                '{"patient_id":"Patient_1"}',
+            )
 
     def test_extract_keyframes_from_root_skips_existing_sequences(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -457,7 +465,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(results[0].selected_count, 1)
             self.assertEqual(sorted(path.name for path in output_dir.iterdir()), ["frame_00099.png"])
 
-    def test_extract_keyframes_from_root_copies_patient_views_json_when_skipping_existing(self) -> None:
+    def test_extract_keyframes_from_root_copies_patient_metadata_files_when_skipping_existing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             dataset_root = Path(temp_dir) / "dataset"
             patient_dir = dataset_root / "Patient_1"
@@ -467,6 +475,7 @@ class PipelineTests(unittest.TestCase):
             frames_dir.mkdir(parents=True)
             output_dir.mkdir(parents=True)
             (patient_dir / "views.json").write_text('{"view":"RAO"}', encoding="utf-8")
+            (patient_dir / "patient.json").write_text('{"patient_id":"Patient_1"}', encoding="utf-8")
 
             for index in range(4):
                 image = np.full((16, 16, 3), 180, dtype=np.uint8)
@@ -484,6 +493,12 @@ class PipelineTests(unittest.TestCase):
             mirrored_views_path = output_root / "Patient_1" / "views.json"
             self.assertTrue(mirrored_views_path.is_file())
             self.assertEqual(mirrored_views_path.read_text(encoding="utf-8"), '{"view":"RAO"}')
+            mirrored_patient_path = output_root / "Patient_1" / "patient.json"
+            self.assertTrue(mirrored_patient_path.is_file())
+            self.assertEqual(
+                mirrored_patient_path.read_text(encoding="utf-8"),
+                '{"patient_id":"Patient_1"}',
+            )
 
     def test_multi_worker_execution_matches_single_worker_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -186,6 +186,7 @@ Expected raw input:
 data/raw_cases/
   case_001/
     views.json
+    patient.json
     view_01/
       frames/
         slice_0001.png
@@ -202,11 +203,14 @@ Expected pipeline outputs:
 work/keyframes/
   case_001/
     views.json
+    patient.json
     view_01/
       slice_0003.png
       slice_0004.png
 work/vessel_masks/
   case_001/
+    views.json
+    patient.json
     view_01/
       slice_0003_mask.png
       slice_0004_mask.png
@@ -228,4 +232,4 @@ work/case_results/
     case_multiview_fusion.json
 ```
 
-Keyframe extraction preserves case-level `views.json` files in the keyframe output tree. Multi-view fusion uses `views.json` to combine temporal fusion outputs across views.
+Keyframe extraction preserves case-level `views.json` and `patient.json` files in the keyframe output tree. Multi-view fusion uses `views.json` to combine temporal fusion outputs across views.

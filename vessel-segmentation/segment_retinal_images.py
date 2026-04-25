@@ -29,6 +29,7 @@ from drive_seg.visualization import (
 )
 
 IGNORED_INPUT_FILENAMES = {"extract_complete.png", ".extract_complete.png"}
+MIRRORED_METADATA_FILENAMES = {"views.json", "patient.json"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,7 +109,15 @@ def validate_single_image_stenosis_output_path(
         )
 
 
-def copy_mirrored_json_files(input_root: Path, output_root: Path) -> int:
+def is_mirrored_metadata_json_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.name.lower() in MIRRORED_METADATA_FILENAMES:
+        return True
+    return path.suffix.lower() == ".json"
+
+
+def copy_mirrored_metadata_json_files(input_root: Path, output_root: Path) -> int:
     if not input_root.is_dir():
         return 0
 
@@ -117,7 +126,7 @@ def copy_mirrored_json_files(input_root: Path, output_root: Path) -> int:
     for json_path in sorted(
         path
         for path in input_root.rglob("*")
-        if path.is_file() and path.suffix.lower() == ".json"
+        if is_mirrored_metadata_json_file(path)
     ):
         resolved_json_path = json_path.resolve()
         if (
@@ -135,6 +144,10 @@ def copy_mirrored_json_files(input_root: Path, output_root: Path) -> int:
         copied_files += 1
 
     return copied_files
+
+
+def copy_mirrored_json_files(input_root: Path, output_root: Path) -> int:
+    return copy_mirrored_metadata_json_files(input_root, output_root)
 
 
 def main() -> None:
@@ -168,7 +181,7 @@ def main() -> None:
             masks_root=stenosis_masks_root,
             image_id=image_names[0],
         )
-    copied_json_files = copy_mirrored_json_files(
+    copied_json_files = copy_mirrored_metadata_json_files(
         input_root=args.input,
         output_root=output_root,
     )

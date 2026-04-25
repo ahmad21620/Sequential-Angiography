@@ -10,7 +10,7 @@ from .rendering import load_resized_image, paint_points, to_zero_based_xy
 
 
 SUMMARY_IMAGE_SUFFIX = "_summary.png"
-INFO_PANEL_WIDTH = 360
+INFO_PANEL_WIDTH = 440
 TEXT_MARGIN = 24
 LINE_HEIGHT = 30
 TITLE_LINE_HEIGHT = 42
@@ -59,7 +59,9 @@ def create_view_summary_visualization(view_result: ViewLevelResult) -> np.ndarra
     _draw_persistent_tracks(summary_canvas, persistent_tracks, final_track_id=_final_track_id(view_result))
     _draw_final_lesion_highlight(summary_canvas, view_result.final_lesion)
 
-    info_panel = _build_info_panel(view_result, persistent_tracks, height=summary_canvas.shape[0])
+    output_height = max(summary_canvas.shape[0], _measure_info_panel_height(view_result, persistent_tracks))
+    summary_canvas = _pad_canvas_to_height(summary_canvas, output_height)
+    info_panel = _build_info_panel(view_result, persistent_tracks, height=output_height)
     return np.hstack((summary_canvas, info_panel))
 
 
@@ -78,6 +80,15 @@ def _load_reference_canvas(reference_frame: FrameLevelResult) -> np.ndarray:
         canvas = _apply_mask_tint(canvas, mask_image)
 
     return canvas
+
+
+def _pad_canvas_to_height(canvas: np.ndarray, height: int) -> np.ndarray:
+    if canvas.shape[0] >= height:
+        return canvas
+
+    padded_canvas = np.full((height, canvas.shape[1], 3), BACKGROUND_COLOR, dtype=np.uint8)
+    padded_canvas[: canvas.shape[0], :, :] = canvas
+    return padded_canvas
 
 
 def _draw_reference_header(canvas: np.ndarray, reference_frame: FrameLevelResult) -> None:
@@ -185,16 +196,32 @@ def _build_info_panel(
     height: int,
 ) -> np.ndarray:
     panel = np.full((height, INFO_PANEL_WIDTH, 3), INFO_PANEL_COLOR, dtype=np.uint8)
+    _draw_info_panel_content(panel, view_result, persistent_tracks)
+    return panel
+
+
+def _measure_info_panel_height(
+    view_result: ViewLevelResult,
+    persistent_tracks: list[tuple[PersistentLesion, LesionTrack | None]],
+) -> int:
+    return _draw_info_panel_content(None, view_result, persistent_tracks) + TEXT_MARGIN
+
+
+def _draw_info_panel_content(
+    panel: np.ndarray | None,
+    view_result: ViewLevelResult,
+    persistent_tracks: list[tuple[PersistentLesion, LesionTrack | None]],
+) -> int:
     y = TEXT_MARGIN + 6
 
-    y = _draw_text_block(panel, "Temporal Fusion", y, font_scale=0.98, color=TEXT_COLOR, thickness=2, line_height=TITLE_LINE_HEIGHT)
-    y = _draw_text_block(panel, f"View: {view_result.view_id}", y, font_scale=0.54, color=MUTED_TEXT_COLOR)
     y = _draw_text_block(
         panel,
-        f"Reference: {view_result.reference_frame.image_name}",
+        "Temporal Fusion",
         y,
-        font_scale=0.54,
-        color=MUTED_TEXT_COLOR,
+        font_scale=0.98,
+        color=TEXT_COLOR,
+        thickness=2,
+        line_height=TITLE_LINE_HEIGHT,
         extra_spacing=12,
     )
 
@@ -217,25 +244,30 @@ def _build_info_panel(
         for index, (lesion, track) in enumerate(persistent_tracks):
             color = FINAL_LESION_COLOR if final_lesion is not None and lesion.track_id == final_lesion.track_id else TRACK_COLORS[index % len(TRACK_COLORS)]
             y = _draw_lesion_summary_line(panel, lesion, track, y, color=color)
-            if y > height - 110:
-                break
 
     y = _draw_section_title(panel, "Fusion", y)
     fallback_count = sum(1 for registration in view_result.registrations if registration.fallback_used)
     y = _draw_key_value(panel, "Tracks", f"{len(view_result.tracks)}", y)
     y = _draw_key_value(panel, "Fallback Registrations", f"{fallback_count}", y)
     y = _draw_key_value(panel, "Rule", "median degree -> max degree -> persistence", y, font_scale=0.46)
-    return panel
+    return y
 
 
-def _draw_section_title(panel: np.ndarray, title: str, y: int) -> int:
-    cv2.putText(panel, title, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, 0.66, TEXT_COLOR, 2, cv2.LINE_AA)
-    cv2.line(panel, (TEXT_MARGIN, y + 10), (INFO_PANEL_WIDTH - TEXT_MARGIN, y + 10), color=(220, 226, 232), thickness=1)
+def _draw_section_title(panel: np.ndarray | None, title: str, y: int) -> int:
+    if panel is not None:
+        cv2.putText(panel, title, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, 0.66, TEXT_COLOR, 2, cv2.LINE_AA)
+        cv2.line(
+            panel,
+            (TEXT_MARGIN, y + 10),
+            (_panel_width(panel) - TEXT_MARGIN, y + 10),
+            color=(220, 226, 232),
+            thickness=1,
+        )
     return y + 34
 
 
 def _draw_key_value(
-    panel: np.ndarray,
+    panel: np.ndarray | None,
     key: str,
     value: str,
     y: int,
@@ -243,15 +275,17 @@ def _draw_key_value(
     font_scale: float = 0.54,
     extra_spacing: int = 0,
 ) -> int:
-    cv2.putText(panel, key, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, MUTED_TEXT_COLOR, 1, cv2.LINE_AA)
-    for line in _wrap_text(value, max_chars=26):
-        cv2.putText(panel, line, (TEXT_MARGIN, y + 20), cv2.FONT_HERSHEY_SIMPLEX, font_scale, TEXT_COLOR, 1, cv2.LINE_AA)
+    if panel is not None:
+        cv2.putText(panel, key, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, MUTED_TEXT_COLOR, 1, cv2.LINE_AA)
+    for line in _wrap_text(value, max_width=_available_text_width(panel), font_scale=font_scale, thickness=1):
+        if panel is not None:
+            cv2.putText(panel, line, (TEXT_MARGIN, y + 20), cv2.FONT_HERSHEY_SIMPLEX, font_scale, TEXT_COLOR, 1, cv2.LINE_AA)
         y += LINE_HEIGHT
     return y + 8 + extra_spacing
 
 
 def _draw_text_block(
-    panel: np.ndarray,
+    panel: np.ndarray | None,
     text: str,
     y: int,
     *,
@@ -261,59 +295,68 @@ def _draw_text_block(
     line_height: int = LINE_HEIGHT,
     extra_spacing: int = 0,
 ) -> int:
-    for line in _wrap_text(text, max_chars=34):
-        cv2.putText(panel, line, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+    for line in _wrap_text(text, max_width=_available_text_width(panel), font_scale=font_scale, thickness=thickness):
+        if panel is not None:
+            cv2.putText(panel, line, (TEXT_MARGIN, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
         y += line_height
     return y + extra_spacing
 
 
 def _draw_lesion_summary_line(
-    panel: np.ndarray,
+    panel: np.ndarray | None,
     lesion: PersistentLesion,
     track: LesionTrack | None,
     y: int,
     *,
     color: tuple[int, int, int],
 ) -> int:
-    cv2.circle(panel, (TEXT_MARGIN + 6, y - 6), radius=6, color=color, thickness=-1, lineType=cv2.LINE_AA)
-    cv2.putText(
-        panel,
-        f"L{lesion.lesion_id} / T{lesion.track_id}",
-        (TEXT_MARGIN + 24, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.54,
-        TEXT_COLOR,
-        1,
-        cv2.LINE_AA,
-    )
+    text_x = TEXT_MARGIN + 24
+    text_width = _available_text_width(panel, left_x=text_x)
+    if panel is not None:
+        cv2.circle(panel, (TEXT_MARGIN + 6, y - 6), radius=6, color=color, thickness=-1, lineType=cv2.LINE_AA)
+        cv2.putText(
+            panel,
+            f"L{lesion.lesion_id} / T{lesion.track_id}",
+            (text_x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.54,
+            TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
     stats_text = (
         f"{lesion.supporting_frame_count}/{lesion.total_frame_count}  "
         f"med {lesion.median_degree:.3f}  max {lesion.max_degree:.3f}"
     )
-    cv2.putText(
-        panel,
-        stats_text,
-        (TEXT_MARGIN + 24, y + 22),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        MUTED_TEXT_COLOR,
-        1,
-        cv2.LINE_AA,
-    )
+    stats_y = y + 22
+    for line in _wrap_text(stats_text, max_width=text_width, font_scale=0.46, thickness=1):
+        if panel is not None:
+            cv2.putText(
+                panel,
+                line,
+                (text_x, stats_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.46,
+                MUTED_TEXT_COLOR,
+                1,
+                cv2.LINE_AA,
+            )
+        stats_y += 20
     if track is not None and track.mean_centerline_position is not None:
-        cv2.putText(
-            panel,
-            f"pos {track.mean_centerline_position:.3f}",
-            (TEXT_MARGIN + 24, y + 42),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.44,
-            MUTED_TEXT_COLOR,
-            1,
-            cv2.LINE_AA,
-        )
-        return y + 58
+        if panel is not None:
+            cv2.putText(
+                panel,
+                f"pos {track.mean_centerline_position:.3f}",
+                (text_x, stats_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.44,
+                MUTED_TEXT_COLOR,
+                1,
+                cv2.LINE_AA,
+            )
+        return stats_y + 18
 
-    return y + 46
+    return stats_y + 6
 
 
 def _tracks_by_id(tracks: list[LesionTrack]) -> dict[int, LesionTrack]:
@@ -344,15 +387,20 @@ def _apply_mask_tint(canvas: np.ndarray, mask_image: np.ndarray) -> np.ndarray:
     return cv2.addWeighted(canvas, 0.9, colored_mask, 0.22, 0.0)
 
 
-def _wrap_text(text: str, *, max_chars: int) -> list[str]:
-    words = []
-    for raw_word in text.split():
-        if len(raw_word) <= max_chars:
-            words.append(raw_word)
-            continue
+def _available_text_width(panel: np.ndarray | None, *, left_x: int = TEXT_MARGIN) -> int:
+    return _panel_width(panel) - left_x - TEXT_MARGIN
 
-        for start_index in range(0, len(raw_word), max_chars):
-            words.append(raw_word[start_index : start_index + max_chars])
+
+def _panel_width(panel: np.ndarray | None) -> int:
+    if panel is None:
+        return INFO_PANEL_WIDTH
+    return int(panel.shape[1])
+
+
+def _wrap_text(text: str, *, max_width: int, font_scale: float, thickness: int) -> list[str]:
+    words: list[str] = []
+    for raw_word in text.split():
+        words.extend(_split_word_to_width(raw_word, max_width=max_width, font_scale=font_scale, thickness=thickness))
 
     if not words:
         return [""]
@@ -361,11 +409,36 @@ def _wrap_text(text: str, *, max_chars: int) -> list[str]:
     current_line = words[0]
 
     for word in words[1:]:
-        if len(current_line) + 1 + len(word) <= max_chars:
-            current_line = f"{current_line} {word}"
+        candidate_line = f"{current_line} {word}"
+        if _text_width(candidate_line, font_scale=font_scale, thickness=thickness) <= max_width:
+            current_line = candidate_line
             continue
         lines.append(current_line)
         current_line = word
 
     lines.append(current_line)
     return lines
+
+
+def _split_word_to_width(word: str, *, max_width: int, font_scale: float, thickness: int) -> list[str]:
+    if _text_width(word, font_scale=font_scale, thickness=thickness) <= max_width:
+        return [word]
+
+    pieces: list[str] = []
+    current_piece = ""
+    for character in word:
+        candidate_piece = f"{current_piece}{character}"
+        if current_piece and _text_width(candidate_piece, font_scale=font_scale, thickness=thickness) > max_width:
+            pieces.append(current_piece)
+            current_piece = character
+            continue
+        current_piece = candidate_piece
+
+    if current_piece:
+        pieces.append(current_piece)
+    return pieces
+
+
+def _text_width(text: str, *, font_scale: float, thickness: int) -> int:
+    text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    return int(text_size[0])

@@ -28,7 +28,7 @@ from stenosis_detection.temporal.models import (
 )
 from stenosis_detection.temporal.reference import select_reference_frame
 from stenosis_detection.temporal.video import create_view_demo_frames
-from stenosis_detection.temporal.visualization import create_view_summary_visualization
+from stenosis_detection.temporal.visualization import INFO_PANEL_WIDTH, create_view_summary_visualization
 
 
 class TemporalFusionTests(unittest.TestCase):
@@ -176,7 +176,18 @@ class TemporalFusionTests(unittest.TestCase):
         self.assertEqual(summary_image.ndim, 3)
         self.assertEqual(summary_image.shape[2], 3)
         self.assertEqual(summary_image.shape[0], view_result.reference_frame.height)
-        self.assertEqual(summary_image.shape[1], view_result.reference_frame.width + 360)
+        self.assertEqual(summary_image.shape[1], view_result.reference_frame.width + INFO_PANEL_WIDTH)
+
+    def test_summary_visualization_grows_to_fit_info_panel(self) -> None:
+        view_result = self._make_view_result_for_rendering()
+        view_result.reference_frame.width = 220
+        view_result.reference_frame.height = 220
+        view_result.persistent_lesions = view_result.persistent_lesions * 8
+
+        summary_image = create_view_summary_visualization(view_result)
+
+        self.assertGreater(summary_image.shape[0], view_result.reference_frame.height)
+        self.assertEqual(summary_image.shape[1], view_result.reference_frame.width + INFO_PANEL_WIDTH)
 
     def test_video_renderer_builds_minimal_demo_frames(self) -> None:
         view_result = self._make_view_result_for_rendering()

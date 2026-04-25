@@ -70,3 +70,6 @@ Thumbs.db
 Desktop.ini
 .idea/
 .vscode/
+
+.history/
+Output/

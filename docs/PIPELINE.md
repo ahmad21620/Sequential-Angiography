@@ -22,8 +22,9 @@ The package names are `angio_keyframes`, `drive_seg`, and
 ## Expected Raw Input
 
 A typical raw dataset is a case tree with one or more views. Each view contains
-an ordered frame sequence. A case-level `views.json` can live directly under the
-case folder and describes the view geometry used later by multi-view fusion.
+an ordered frame sequence. Case-level `views.json` and `patient.json` files can
+live directly under the case folder. `views.json` describes the view geometry
+used later by multi-view fusion.
 
 Example:
 
@@ -31,6 +32,7 @@ Example:
 data/raw_cases/
   case_001/
     views.json
+    patient.json
     view_01/
       frames/
         slice_0001.png
@@ -47,8 +49,9 @@ Keyframe extraction discovers nested image directories. If a directory named
 `frames` contains images, the output mirrors the parent view path and does not
 copy the literal `frames` directory into the output.
 
-`views.json` is expected to be case-level metadata. The keyframe stage copies
-`<input-root>/<case_id>/views.json` to `<output-root>/<case_id>/views.json` so
+`views.json` and `patient.json` are expected to be case-level metadata. The
+keyframe stage copies `<input-root>/<case_id>/views.json` and
+`<input-root>/<case_id>/patient.json` to the corresponding output case folder so
 the metadata remains available after keyframe extraction.
 
 ## Expected Intermediate Structure
@@ -61,6 +64,7 @@ work/
   keyframes/
     case_001/
       views.json
+      patient.json
       view_01/
         slice_0003.png
         slice_0004.png
@@ -71,6 +75,8 @@ work/
         ...
   vessel_masks/
     case_001/
+      views.json
+      patient.json
       view_01/
         slice_0003_mask.png
         slice_0004_mask.png
@@ -152,8 +158,8 @@ Expected outputs:
 - A mirrored keyframe tree under `work/keyframes`.
 - Selected keyframe images only; original `frames` folders are not copied into
   the output tree.
-- Case-level `views.json` files copied from immediate child case folders under
-  the input root into the corresponding output case folders.
+- Case-level `views.json` and `patient.json` files copied from immediate child
+  case folders under the input root into the corresponding output case folders.
 
 If `--output-root` is omitted, the keyframe CLI creates its default sibling
 output directory next to the input path.
@@ -192,8 +198,9 @@ Expected outputs:
 - One mask per processed keyframe.
 - Mask names in the form `<image_stem>_mask.png`, for example
   `slice_0003_mask.png`.
-- JSON files found in the input tree are copied to the output tree by the mask
-  generation command, preserving metadata such as `views.json` when present.
+- JSON metadata files found in the input tree are copied to the output tree by
+  the mask generation command, preserving metadata such as `views.json` and
+  `patient.json` when present.
 
 For model development rather than pipeline inference, the vessel project also
 keeps its existing commands:

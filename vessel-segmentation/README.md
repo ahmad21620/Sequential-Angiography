@@ -243,6 +243,9 @@ python segment_retinal_images.py \
 If the input contains `data/case_root/study_a/series_b/slice_0001.png`, this produces
 `outputs/stenosis_masks/study_a/series_b/slice_0001_mask.png`.
 
+JSON metadata from the input tree is mirrored into the mask root as well, including
+case-level `views.json` and `patient.json` files when present.
+
 You can then use the same segmentation input tree with the `stenosis-detection`
 CLI `--images-root` and the mirrored mask tree as `--masks-root`:
 
