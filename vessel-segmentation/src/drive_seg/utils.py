@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import os
+import pathlib
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -54,10 +57,26 @@ def list_image_files(input_path: Path, recursive: bool = False) -> list[Path]:
     return image_paths
 
 
+@contextmanager
+def _portable_pathlib_checkpoint_load() -> Iterator[None]:
+    original_posix_path = pathlib.PosixPath
+    original_windows_path = pathlib.WindowsPath
+    try:
+        if os.name == "nt":
+            pathlib.PosixPath = pathlib.WindowsPath
+        else:
+            pathlib.WindowsPath = pathlib.PosixPath
+        yield
+    finally:
+        pathlib.PosixPath = original_posix_path
+        pathlib.WindowsPath = original_windows_path
+
+
 def load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict[str, Any]:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    return torch.load(checkpoint_path, map_location=device, weights_only=False)
+    with _portable_pathlib_checkpoint_load():
+        return torch.load(checkpoint_path, map_location=device, weights_only=False)
 
 
 def save_json(output_path: Path, payload: dict[str, Any]) -> None:
