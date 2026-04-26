@@ -16,6 +16,7 @@ from stenosis_detection import (
     load_multiview_case,
     run_multiview_fusion,
     save_multiview_case_result,
+    save_multiview_visualization_outputs,
 )
 
 
@@ -32,11 +33,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-json",
         help="Direct path to one case-level 'views.json' file.",
     )
+    input_group.add_argument(
+        "--case-root-tree",
+        help="Root directory containing one or more case folders with 'views.json'.",
+    )
 
     parser.add_argument(
         "--output",
-        required=True,
         help="Path to the output JSON file for the fused case-level result.",
+    )
+    parser.add_argument(
+        "--output-root",
+        help="Root directory where mirrored case-level fusion outputs will be written in tree mode.",
     )
     parser.add_argument(
         "--duplicate-angle-distance",
@@ -87,26 +95,20 @@ def main() -> int:
         parser.error("--high-confidence-threshold must be in the range [0.0, 1.0].")
     if args.medium_confidence_threshold > args.high_confidence_threshold:
         parser.error("--medium-confidence-threshold must be <= --high-confidence-threshold.")
+    if args.case_root_tree is not None:
+        if args.output_root is None:
+            parser.error("--case-root-tree requires --output-root.")
+        if args.output is not None:
+            parser.error("--output is only supported for single-case mode. Use --output-root with --case-root-tree.")
+    elif args.output is None:
+        parser.error("--output is required for single-case mode.")
 
     try:
-        case_input_path = _resolve_case_input_path(args)
-        multiview_case = load_multiview_case(case_input_path)
-        print(f"Loaded case '{multiview_case.case_id}' with {multiview_case.view_count} views.")
+        config = _build_fusion_config(args)
+        if args.case_root_tree is not None:
+            return _run_tree_mode(Path(args.case_root_tree), Path(args.output_root), config)
 
-        case_result = run_multiview_fusion(
-            multiview_case,
-            config=MultiViewFusionConfig(
-                duplicate_view_angle_distance_degrees=args.duplicate_angle_distance,
-                distinct_view_angle_distance_degrees=args.distinct_angle_distance,
-                support_score_scale=args.support_score_scale,
-                medium_confidence_threshold=args.medium_confidence_threshold,
-                high_confidence_threshold=args.high_confidence_threshold,
-            ),
-        )
-        _print_fusion_summary(case_result)
-
-        output_path = save_multiview_case_result(case_result, Path(args.output))
-        print(f"Saved case-level result: {output_path}")
+        _run_one_case(_resolve_case_input_path(args), Path(args.output), config)
         return 0
     except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
         print(f"Multi-view fusion failed: {exc}", file=sys.stderr)
@@ -123,6 +125,76 @@ def _resolve_case_input_path(args: argparse.Namespace) -> Path:
         return case_root / "views.json"
 
     return Path(args.input_json)
+
+
+def _build_fusion_config(args: argparse.Namespace) -> MultiViewFusionConfig:
+    return MultiViewFusionConfig(
+        duplicate_view_angle_distance_degrees=args.duplicate_angle_distance,
+        distinct_view_angle_distance_degrees=args.distinct_angle_distance,
+        support_score_scale=args.support_score_scale,
+        medium_confidence_threshold=args.medium_confidence_threshold,
+        high_confidence_threshold=args.high_confidence_threshold,
+    )
+
+
+def _run_tree_mode(case_root_tree: Path, output_root: Path, config: MultiViewFusionConfig) -> int:
+    case_inputs = _discover_case_input_paths(case_root_tree)
+    processed = 0
+    failed = 0
+
+    for case_input_path in case_inputs:
+        output_path = _build_tree_output_path(case_input_path, case_root_tree, output_root)
+        try:
+            _run_one_case(case_input_path, output_path, config)
+            processed += 1
+        except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
+            failed += 1
+            print(f"Failed case '{case_input_path}': {exc}", file=sys.stderr)
+
+    print(f"Processed cases: {processed}")
+    print(f"Failed cases: {failed}")
+    return 0 if failed == 0 else 1
+
+
+def _discover_case_input_paths(case_root_tree: Path) -> list[Path]:
+    if not case_root_tree.exists():
+        raise FileNotFoundError(f"Case root tree does not exist: {case_root_tree}")
+    if not case_root_tree.is_dir():
+        raise NotADirectoryError(f"Case root tree is not a directory: {case_root_tree}")
+
+    case_inputs = sorted(path for path in case_root_tree.rglob("views.json") if path.is_file())
+    if not case_inputs:
+        raise FileNotFoundError(f"No views.json files were found under: {case_root_tree}")
+    return case_inputs
+
+
+def _build_tree_output_path(case_input_path: Path, case_root_tree: Path, output_root: Path) -> Path:
+    relative_case_dir = case_input_path.parent.relative_to(case_root_tree)
+    return output_root / relative_case_dir / "case_multiview_fusion.json"
+
+
+def _run_one_case(case_input_path: Path, output_path: Path, config: MultiViewFusionConfig) -> MultiViewCaseResult:
+    multiview_case = load_multiview_case(case_input_path)
+    print(f"Loaded case '{multiview_case.case_id}' with {multiview_case.view_count} views.")
+
+    case_result = run_multiview_fusion(multiview_case, config=config)
+    _print_fusion_summary(case_result)
+
+    saved_path = save_multiview_case_result(case_result, output_path)
+    print(f"Saved case-level result: {saved_path}")
+    _save_visualizations(case_result, saved_path)
+    return case_result
+
+
+def _save_visualizations(case_result: MultiViewCaseResult, output_path: Path) -> None:
+    try:
+        visualization_paths = save_multiview_visualization_outputs(case_result, output_path)
+    except Exception as exc:
+        print(f"Warning: failed to save multi-view visualizations: {exc}", file=sys.stderr)
+        return
+
+    print(f"Saved multi-view summary visualization: {visualization_paths['summary_png']}")
+    print(f"Saved multi-view support matrix: {visualization_paths['support_matrix_png']}")
 
 
 def _print_fusion_summary(case_result: MultiViewCaseResult) -> None:

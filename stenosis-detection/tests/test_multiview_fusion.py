@@ -19,6 +19,7 @@ from stenosis_detection.multiview import (
     load_multiview_case_input,
     run_multiview_fusion,
     save_multiview_case_result,
+    save_multiview_visualization_outputs,
 )
 
 
@@ -51,6 +52,30 @@ class MultiViewFusionTests(unittest.TestCase):
             )
 
             self.assertEqual(resolved_path, views_json_path)
+
+    def test_tree_mode_writes_mirrored_case_outputs(self) -> None:
+        fixture_dir = self._fixture_dir("single_view_case")
+        payload = json.loads((fixture_dir / "multiview_input.json").read_text(encoding="utf-8"))
+        for view in payload["views"]:
+            view["temporal_fusion_json"] = str((fixture_dir / view["temporal_fusion_json"]).resolve())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            case_root = temp_root / "cases" / "case_a"
+            output_root = temp_root / "outputs"
+            case_root.mkdir(parents=True)
+            (case_root / "views.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            exit_code = multiview_cli._run_tree_mode(
+                temp_root / "cases",
+                output_root,
+                multiview_cli.MultiViewFusionConfig(),
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_root / "case_a" / "case_multiview_fusion.json").is_file())
+            self.assertTrue((output_root / "case_a" / "case_multiview_fusion_summary.png").is_file())
+            self.assertTrue((output_root / "case_a" / "case_multiview_fusion_support_matrix.png").is_file())
 
     def test_loader_accepts_sequence_based_temporal_view_id_with_friendly_view_id(self) -> None:
         fixture_dir = self._fixture_dir("single_view_case")
@@ -175,6 +200,20 @@ class MultiViewFusionTests(unittest.TestCase):
         self.assertEqual(payload["confidence"]["label"], "medium")
         self.assertEqual(payload["supporting_views"], [])
         self.assertIn("selection_rule", payload["fusion_metadata"])
+
+    def test_visualization_outputs_are_written_without_temporal_thumbnails(self) -> None:
+        case_result = run_multiview_fusion(self._load_case("distinct_support_case"))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "case_multiview_fusion.json"
+            save_multiview_case_result(case_result, output_path)
+
+            output_paths = save_multiview_visualization_outputs(case_result, output_path)
+
+            self.assertTrue(output_paths["summary_png"].is_file())
+            self.assertGreater(output_paths["summary_png"].stat().st_size, 0)
+            self.assertTrue(output_paths["support_matrix_png"].is_file())
+            self.assertGreater(output_paths["support_matrix_png"].stat().st_size, 0)
 
     def _load_case(self, case_name: str):
         fixture_dir = self._fixture_dir(case_name)

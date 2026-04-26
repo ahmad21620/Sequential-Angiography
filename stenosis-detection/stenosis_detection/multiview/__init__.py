@@ -8,12 +8,19 @@ from .fusion import (
     SUPPORT_SCORE_SCALE,
     build_multiview_view_summaries,
     compute_angle_distance,
+    compute_diversity_weight,
     compute_distinct_view_support_score,
     is_duplicate_view,
     run_multiview_fusion,
     save_multiview_case_result,
     score_lesion_candidate,
     select_final_case_lesion,
+)
+from .visualization import (
+    build_multiview_visualization_paths,
+    create_multiview_summary_visualization,
+    create_multiview_support_matrix_visualization,
+    save_multiview_visualization_outputs,
 )
 from .loader import MultiViewLoadError, load_multiview_case, load_multiview_case_input, load_multiview_view_result
 from .models import (
@@ -53,14 +60,19 @@ __all__ = [
     "SUPPORT_SCORE_SCALE",
     "ViewLevelLesionCandidate",
     "build_multiview_view_summaries",
+    "build_multiview_visualization_paths",
     "compute_angle_distance",
+    "compute_diversity_weight",
     "compute_distinct_view_support_score",
+    "create_multiview_summary_visualization",
+    "create_multiview_support_matrix_visualization",
     "is_duplicate_view",
     "load_multiview_case",
     "load_multiview_case_input",
     "load_multiview_view_result",
     "run_multiview_fusion",
     "save_multiview_case_result",
+    "save_multiview_visualization_outputs",
     "score_lesion_candidate",
     "select_final_case_lesion",
 ]

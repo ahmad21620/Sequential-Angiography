@@ -146,7 +146,7 @@ def compute_distinct_view_support_score(
             continue
 
         angle_distance = compute_angle_distance(primary_view, view_summary.view_input)
-        support_score += support_score_scale * candidate_score * _compute_diversity_weight(
+        support_score += support_score_scale * candidate_score * compute_diversity_weight(
             angle_distance,
             duplicate_distance_degrees=duplicate_distance_degrees,
             distinct_distance_degrees=distinct_distance_degrees,
@@ -164,6 +164,23 @@ def compute_distinct_view_support_score(
         supporting_view_ids,
         distinct_supporting_view_ids,
     )
+
+
+def compute_diversity_weight(
+    angle_distance: float,
+    *,
+    duplicate_distance_degrees: float = DUPLICATE_VIEW_ANGLE_DISTANCE_DEGREES,
+    distinct_distance_degrees: float = DISTINCT_VIEW_ANGLE_DISTANCE_DEGREES,
+) -> float:
+    """Return the angle-diversity multiplier used for cross-view support."""
+    if angle_distance <= duplicate_distance_degrees:
+        return 0.25
+    if angle_distance >= distinct_distance_degrees:
+        return 1.0
+
+    distance_range = distinct_distance_degrees - duplicate_distance_degrees
+    normalized_distance = (angle_distance - duplicate_distance_degrees) / distance_range
+    return 0.25 + (0.75 * normalized_distance)
 
 
 def score_lesion_candidate(candidate: ViewLevelLesionCandidate) -> LesionCandidateScore:
@@ -259,22 +276,6 @@ def _compute_stability_adjustment(candidate: ViewLevelLesionCandidate) -> float:
     return _clamp_signed_score(degree_component + gap_component, lower_bound=-0.10, upper_bound=0.10)
 
 
-def _compute_diversity_weight(
-    angle_distance: float,
-    *,
-    duplicate_distance_degrees: float,
-    distinct_distance_degrees: float,
-) -> float:
-    if angle_distance <= duplicate_distance_degrees:
-        return 0.25
-    if angle_distance >= distinct_distance_degrees:
-        return 1.0
-
-    distance_range = distinct_distance_degrees - duplicate_distance_degrees
-    normalized_distance = (angle_distance - duplicate_distance_degrees) / distance_range
-    return 0.25 + (0.75 * normalized_distance)
-
-
 def _label_confidence(confidence_score: float, config: MultiViewFusionConfig) -> str:
     if confidence_score >= config.high_confidence_threshold:
         return "high"
@@ -348,6 +349,7 @@ __all__ = [
     "SUPPORT_SCORE_SCALE",
     "build_multiview_view_summaries",
     "compute_angle_distance",
+    "compute_diversity_weight",
     "compute_distinct_view_support_score",
     "is_duplicate_view",
     "run_multiview_fusion",
