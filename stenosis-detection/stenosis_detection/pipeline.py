@@ -26,7 +26,7 @@ class PipelineConfig:
     min_component_area: int = 16
     remove_border_artifacts: bool = True
     border_margin_px: int = 3
-    border_artifact_max_height: int = 8
+    border_artifact_max_height: int = 12
     border_artifact_min_width_ratio: float = 0.5
     radius_search_range: float = 110.0
     radius_vessel_threshold: int = 127
@@ -275,6 +275,9 @@ def _clean_binary_mask(binary_mask: np.ndarray, config: PipelineConfig) -> np.nd
 
     if config.remove_border_artifacts:
         cleaned_mask = _remove_border_artifact_components(cleaned_mask, config)
+        cleaned_mask = _remove_long_horizontal_border_runs(cleaned_mask, config)
+        cleaned_mask = _remove_border_band_residue_components(cleaned_mask, config)
+        cleaned_mask = _remove_small_components(cleaned_mask, config.min_component_area)
 
     return np.asarray(cleaned_mask, dtype=bool)
 
@@ -314,6 +317,7 @@ def _remove_border_artifact_components(binary_mask: np.ndarray, config: Pipeline
         top = int(stats[label, cv2.CC_STAT_TOP])
         component_width = int(stats[label, cv2.CC_STAT_WIDTH])
         component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        component_area = int(stats[label, cv2.CC_STAT_AREA])
         right = left + component_width - 1
         bottom = top + component_height - 1
 
@@ -329,6 +333,7 @@ def _remove_border_artifact_components(binary_mask: np.ndarray, config: Pipeline
         is_border_artifact = _is_long_thin_border_artifact(
             component_width,
             component_height,
+            component_area,
             max_artifact_height,
             min_artifact_width,
         )
@@ -337,6 +342,138 @@ def _remove_border_artifact_components(binary_mask: np.ndarray, config: Pipeline
             keep_labels[label] = False
 
     return keep_labels[labels]
+
+
+def _remove_long_horizontal_border_runs(binary_mask: np.ndarray, config: PipelineConfig) -> np.ndarray:
+    if not np.any(binary_mask):
+        return np.asarray(binary_mask, dtype=bool)
+
+    image_height, image_width = binary_mask.shape[:2]
+    if image_height == 0 or image_width == 0:
+        return np.asarray(binary_mask, dtype=bool)
+
+    artifact_band_px = _border_artifact_band_px(config)
+    max_artifact_height = max(0, int(config.border_artifact_max_height))
+    min_width_ratio = max(0.0, float(config.border_artifact_min_width_ratio))
+    min_artifact_width = int(np.ceil(float(image_width) * min_width_ratio))
+    if min_artifact_width <= 0 or max_artifact_height <= 0:
+        return np.asarray(binary_mask, dtype=bool)
+
+    cleaned_mask = np.asarray(binary_mask, dtype=bool).copy()
+    border_rows = _border_band_indices(image_height, artifact_band_px)
+    for row_index in border_rows:
+        row = cleaned_mask[row_index]
+        for start, stop in _horizontal_artifact_candidates(row, min_artifact_width):
+            if _horizontal_span_thickness(cleaned_mask, row_index, start, stop) <= max_artifact_height:
+                row[start:stop] = False
+
+    return cleaned_mask
+
+
+def _remove_border_band_residue_components(binary_mask: np.ndarray, config: PipelineConfig) -> np.ndarray:
+    if not np.any(binary_mask):
+        return np.asarray(binary_mask, dtype=bool)
+
+    image_height, image_width = binary_mask.shape[:2]
+    if image_height == 0 or image_width == 0:
+        return np.asarray(binary_mask, dtype=bool)
+
+    artifact_band_px = _border_artifact_band_px(config)
+    labels, stats = _connected_component_labels(binary_mask)
+    keep_labels = np.ones(len(stats), dtype=bool)
+    keep_labels[0] = False
+
+    for label in range(1, len(stats)):
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        bottom = top + component_height - 1
+
+        if _component_is_contained_in_border_band(
+            top,
+            bottom,
+            image_height,
+            artifact_band_px,
+        ):
+            keep_labels[label] = False
+
+    return keep_labels[labels]
+
+
+def _border_artifact_band_px(config: PipelineConfig) -> int:
+    return max(0, int(config.border_margin_px), int(config.border_artifact_max_height))
+
+
+def _border_band_indices(image_size: int, border_margin_px: int) -> np.ndarray:
+    border_width = min(image_size, border_margin_px + 1)
+    if border_width <= 0:
+        return np.zeros((0,), dtype=np.int32)
+
+    top_indices = np.arange(0, border_width, dtype=np.int32)
+    bottom_start = max(0, image_size - border_width)
+    bottom_indices = np.arange(bottom_start, image_size, dtype=np.int32)
+    return np.unique(np.concatenate((top_indices, bottom_indices))).astype(np.int32)
+
+
+def _true_runs(row: np.ndarray) -> list[tuple[int, int]]:
+    row_values = np.asarray(row, dtype=bool)
+    if row_values.size == 0 or not np.any(row_values):
+        return []
+
+    padded = np.concatenate(([False], row_values, [False]))
+    changes = np.diff(padded.astype(np.int8))
+    starts = np.where(changes == 1)[0]
+    stops = np.where(changes == -1)[0]
+    return [(int(start), int(stop)) for start, stop in zip(starts, stops, strict=True)]
+
+
+def _horizontal_artifact_candidates(row: np.ndarray, min_artifact_width: int) -> list[tuple[int, int]]:
+    candidates: list[tuple[int, int]] = []
+    for start, stop in _true_runs(row):
+        if stop - start >= min_artifact_width:
+            candidates.append((start, stop))
+
+    true_columns = np.where(row)[0]
+    if true_columns.size >= min_artifact_width:
+        span_start = int(true_columns[0])
+        span_stop = int(true_columns[-1]) + 1
+        if span_stop - span_start >= min_artifact_width:
+            candidates.append((span_start, span_stop))
+
+    return _deduplicate_runs(candidates)
+
+
+def _deduplicate_runs(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not runs:
+        return []
+
+    unique_runs = sorted(set(runs))
+    merged_runs: list[tuple[int, int]] = []
+    for start, stop in unique_runs:
+        if not merged_runs or start > merged_runs[-1][1]:
+            merged_runs.append((start, stop))
+        else:
+            previous_start, previous_stop = merged_runs[-1]
+            merged_runs[-1] = (previous_start, max(previous_stop, stop))
+
+    return merged_runs
+
+
+def _horizontal_span_thickness(binary_mask: np.ndarray, row_index: int, start: int, stop: int) -> int:
+    span_width = max(1, stop - start)
+    row_fill_threshold = max(1, int(np.ceil(float(span_width) * 0.5)))
+    thickness = 1
+
+    previous_row = row_index - 1
+    while previous_row >= 0 and np.count_nonzero(binary_mask[previous_row, start:stop]) >= row_fill_threshold:
+        thickness += 1
+        previous_row -= 1
+
+    next_row = row_index + 1
+    while next_row < binary_mask.shape[0] and np.count_nonzero(binary_mask[next_row, start:stop]) >= row_fill_threshold:
+        thickness += 1
+        next_row += 1
+
+    return thickness
 
 
 def _component_touches_border(
@@ -356,14 +493,35 @@ def _component_touches_border(
     )
 
 
+def _component_is_contained_in_border_band(
+    top: int,
+    bottom: int,
+    image_height: int,
+    artifact_band_px: int,
+) -> bool:
+    if artifact_band_px <= 0:
+        return False
+
+    bottom_band_start = max(0, image_height - artifact_band_px)
+    return (
+        bottom < artifact_band_px
+        or top >= bottom_band_start
+    )
+
+
 def _is_long_thin_border_artifact(
     component_width: int,
     component_height: int,
+    component_area: int,
     max_artifact_height: int,
     min_artifact_width: int,
 ) -> bool:
+    if component_width <= 0:
+        return False
+
+    effective_height = float(component_area) / float(component_width)
     return (
-        component_height <= max_artifact_height
+        (component_height <= max_artifact_height or effective_height <= float(max_artifact_height))
         and component_width > component_height
         and component_width >= min_artifact_width
     )

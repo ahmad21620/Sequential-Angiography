@@ -62,6 +62,61 @@ class PipelineMaskLoadingTests(unittest.TestCase):
         self.assertTrue(np.any(binary_mask[25:40, 22:32]))
         self.assertTrue(binary_mask[-1, 26])
 
+    def test_load_mask_removes_long_bottom_line_even_with_vertical_stub(self) -> None:
+        mask = np.zeros((40, 80), dtype=np.uint8)
+        mask[8:18, 8:14] = 255
+        mask[-1, :] = 255
+        mask[-10:, -1] = 255
+
+        config = PipelineConfig(
+            resize_height=40,
+            resize_width=80,
+            min_component_area=4,
+            border_margin_px=1,
+            border_artifact_max_height=2,
+            border_artifact_min_width_ratio=0.5,
+        )
+
+        _, binary_mask = self._load_temp_mask(mask, config)
+
+        self.assertTrue(np.any(binary_mask[8:18, 8:14]))
+        self.assertFalse(np.any(binary_mask[-1, :]))
+        self.assertFalse(np.any(binary_mask[-10:, -1]))
+
+    def test_load_mask_removes_wide_ten_pixel_bottom_artifact_with_defaults(self) -> None:
+        mask = np.zeros((800, 600), dtype=np.uint8)
+        mask[100:140, 100:112] = 255
+        mask[790:800, 29:600] = 255
+        mask[793:800, 0:17] = 255
+
+        config = PipelineConfig(
+            resize_height=800,
+            resize_width=600,
+        )
+
+        _, binary_mask = self._load_temp_mask(mask, config)
+
+        self.assertTrue(np.any(binary_mask[100:140, 100:112]))
+        self.assertFalse(np.any(binary_mask[790:800, 29:600]))
+        self.assertFalse(np.any(binary_mask[790:800, :]))
+
+    def test_load_mask_preserves_wide_thick_border_touching_component(self) -> None:
+        mask = np.zeros((40, 80), dtype=np.uint8)
+        mask[-12:, 10:70] = 255
+
+        config = PipelineConfig(
+            resize_height=40,
+            resize_width=80,
+            min_component_area=4,
+            border_margin_px=1,
+            border_artifact_max_height=2,
+            border_artifact_min_width_ratio=0.5,
+        )
+
+        _, binary_mask = self._load_temp_mask(mask, config)
+
+        self.assertTrue(np.all(binary_mask[-12:, 10:70]))
+
     def test_load_mask_uses_nearest_neighbor_resize(self) -> None:
         mask = np.asarray(
             [
