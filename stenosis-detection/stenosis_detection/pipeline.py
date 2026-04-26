@@ -22,7 +22,16 @@ SLICE_FRAME_PATTERN = re.compile(r"^slice_(\d+)$", re.IGNORECASE)
 class PipelineConfig:
     resize_height: int = 800
     resize_width: int = 600
+    mask_threshold: int = 127
+    min_component_area: int = 16
+    remove_border_artifacts: bool = True
+    border_margin_px: int = 3
+    border_artifact_max_height: int = 8
+    border_artifact_min_width_ratio: float = 0.5
     radius_search_range: float = 110.0
+    radius_vessel_threshold: int = 127
+    radius_outside_fraction_threshold: float = 0.05
+    radius_min_outside_samples: int = 3
     segmentation_distance_threshold: float = 8.0
     stenosis_threshold: float = 0.25
     average_radius_threshold: float = 4.0
@@ -43,11 +52,13 @@ class StenosisDetectionResult:
     mask_path: Path
     config: PipelineConfig
     original_image_bgr: np.ndarray
+    original_mask_gray: np.ndarray
     mask_gray: np.ndarray
     binary_mask: np.ndarray
     skeleton_mask: np.ndarray
     skeleton_points_rc: np.ndarray
     skeleton_points_xy: np.ndarray
+    point_data: dict[tuple[int, int], float]
     segmentation_points_xy: np.ndarray
     filtered_segmentation_points_xy: np.ndarray
     stenosis_points_xy: np.ndarray
@@ -113,13 +124,20 @@ def run_stenosis_detection(
     resolved_mask_path = Path(mask_path)
 
     original_image_bgr = _load_original_image(resolved_image_path, pipeline_config)
-    mask_gray, binary_mask = _load_mask_image(resolved_mask_path, pipeline_config)
+    original_mask_gray, mask_gray, binary_mask = _load_mask_image_with_debug(resolved_mask_path, pipeline_config)
 
     skeleton_mask = thin_binary_mask(binary_mask)
     skeleton_points_rc = _skeleton_points_rc(skeleton_mask)
     skeleton_points_xy = _flip_points(skeleton_points_rc)
 
-    point_data = build_point_data(skeleton_points_rc, mask_gray, pipeline_config.radius_search_range)
+    point_data = build_point_data(
+        skeleton_points_rc,
+        mask_gray,
+        pipeline_config.radius_search_range,
+        vessel_threshold=pipeline_config.radius_vessel_threshold,
+        outside_fraction_threshold=pipeline_config.radius_outside_fraction_threshold,
+        min_outside_samples=pipeline_config.radius_min_outside_samples,
+    )
 
     segmentation_points_xy = _detect_segmentation_points(skeleton_mask, skeleton_points_rc)
     filtered_segmentation_points_xy = _filter_nearby_segmentation_points(
@@ -162,11 +180,13 @@ def run_stenosis_detection(
         mask_path=resolved_mask_path,
         config=pipeline_config,
         original_image_bgr=original_image_bgr,
+        original_mask_gray=original_mask_gray,
         mask_gray=mask_gray,
         binary_mask=binary_mask,
         skeleton_mask=skeleton_mask,
         skeleton_points_rc=skeleton_points_rc,
         skeleton_points_xy=skeleton_points_xy,
+        point_data=point_data,
         segmentation_points_xy=segmentation_points_xy,
         filtered_segmentation_points_xy=filtered_segmentation_points_xy,
         stenosis_points_xy=stenosis_points_xy,
@@ -194,6 +214,11 @@ def _load_original_image(image_path: Path, config: PipelineConfig) -> np.ndarray
 
 
 def _load_mask_image(mask_path: Path, config: PipelineConfig) -> tuple[np.ndarray, np.ndarray]:
+    _, mask_gray, binary_mask = _load_mask_image_with_debug(mask_path, config)
+    return mask_gray, binary_mask
+
+
+def _load_mask_image_with_debug(mask_path: Path, config: PipelineConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
     if mask is None:
         raise FileNotFoundError(f"Unable to read vessel mask: {mask_path}")
@@ -203,7 +228,7 @@ def _load_mask_image(mask_path: Path, config: PipelineConfig) -> tuple[np.ndarra
     if mask.ndim == 3 and mask.shape[2] == 4:
         mask = cv2.cvtColor(mask, cv2.COLOR_BGRA2BGR)
 
-    resized_mask = _resize_image(mask, config.resize_width, config.resize_height)
+    resized_mask = _resize_mask(mask, config.resize_width, config.resize_height)
 
     if resized_mask.ndim == 3:
         mask_gray = cv2.cvtColor(resized_mask, cv2.COLOR_BGR2GRAY)
@@ -213,8 +238,11 @@ def _load_mask_image(mask_path: Path, config: PipelineConfig) -> tuple[np.ndarra
     if mask_gray.max(initial=0) <= 1:
         mask_gray = np.clip(mask_gray.astype(np.float32) * 255.0, 0, 255).astype(np.uint8)
 
-    binary_mask = mask_gray > 0
-    return mask_gray, binary_mask
+    original_mask_gray = mask_gray.copy()
+    _, mask_gray = cv2.threshold(mask_gray, float(config.mask_threshold), 255, cv2.THRESH_BINARY)
+    binary_mask = _clean_binary_mask(mask_gray > 0, config)
+    mask_gray = (binary_mask.astype(np.uint8) * 255).astype(np.uint8)
+    return original_mask_gray, mask_gray, binary_mask
 
 
 def _ensure_uint8(image: np.ndarray) -> np.ndarray:
@@ -236,6 +264,117 @@ def _ensure_uint8(image: np.ndarray) -> np.ndarray:
 
 def _resize_image(image: np.ndarray, width: int, height: int) -> np.ndarray:
     return cv2.resize(image, (width, height), interpolation=cv2.INTER_CUBIC)
+
+
+def _resize_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
+    return cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+
+
+def _clean_binary_mask(binary_mask: np.ndarray, config: PipelineConfig) -> np.ndarray:
+    cleaned_mask = _remove_small_components(binary_mask, config.min_component_area)
+
+    if config.remove_border_artifacts:
+        cleaned_mask = _remove_border_artifact_components(cleaned_mask, config)
+
+    return np.asarray(cleaned_mask, dtype=bool)
+
+
+def _remove_small_components(binary_mask: np.ndarray, min_component_area: int) -> np.ndarray:
+    min_area = int(min_component_area)
+    if min_area <= 1 or not np.any(binary_mask):
+        return np.asarray(binary_mask, dtype=bool)
+
+    labels, stats = _connected_component_labels(binary_mask)
+    keep_labels = np.ones(len(stats), dtype=bool)
+    keep_labels[0] = False
+    keep_labels[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
+
+    return keep_labels[labels]
+
+
+def _remove_border_artifact_components(binary_mask: np.ndarray, config: PipelineConfig) -> np.ndarray:
+    if not np.any(binary_mask):
+        return np.asarray(binary_mask, dtype=bool)
+
+    image_height, image_width = binary_mask.shape[:2]
+    if image_height == 0 or image_width == 0:
+        return np.asarray(binary_mask, dtype=bool)
+
+    labels, stats = _connected_component_labels(binary_mask)
+    keep_labels = np.ones(len(stats), dtype=bool)
+    keep_labels[0] = False
+
+    border_margin_px = max(0, int(config.border_margin_px))
+    max_artifact_height = max(0, int(config.border_artifact_max_height))
+    min_width_ratio = max(0.0, float(config.border_artifact_min_width_ratio))
+    min_artifact_width = int(np.ceil(float(image_width) * min_width_ratio))
+
+    for label in range(1, len(stats)):
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        right = left + component_width - 1
+        bottom = top + component_height - 1
+
+        touches_border = _component_touches_border(
+            left,
+            top,
+            right,
+            bottom,
+            image_width,
+            image_height,
+            border_margin_px,
+        )
+        is_border_artifact = _is_long_thin_border_artifact(
+            component_width,
+            component_height,
+            max_artifact_height,
+            min_artifact_width,
+        )
+
+        if touches_border and is_border_artifact:
+            keep_labels[label] = False
+
+    return keep_labels[labels]
+
+
+def _component_touches_border(
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    image_width: int,
+    image_height: int,
+    border_margin_px: int,
+) -> bool:
+    return (
+        left <= border_margin_px
+        or top <= border_margin_px
+        or right >= image_width - 1 - border_margin_px
+        or bottom >= image_height - 1 - border_margin_px
+    )
+
+
+def _is_long_thin_border_artifact(
+    component_width: int,
+    component_height: int,
+    max_artifact_height: int,
+    min_artifact_width: int,
+) -> bool:
+    return (
+        component_height <= max_artifact_height
+        and component_width > component_height
+        and component_width >= min_artifact_width
+    )
+
+
+def _connected_component_labels(binary_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        np.asarray(binary_mask, dtype=np.uint8),
+        connectivity=8,
+    )
+    return labels, stats
 
 
 def _skeleton_points_rc(skeleton_mask: np.ndarray) -> np.ndarray:

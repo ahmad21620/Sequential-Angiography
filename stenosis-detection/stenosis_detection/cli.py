@@ -9,6 +9,7 @@ from .visualization import save_detection_outputs
 
 
 def build_parser() -> argparse.ArgumentParser:
+    defaults = PipelineConfig()
     parser = argparse.ArgumentParser(description="Run stenosis detection on a single slice or an entire mirrored data tree.")
 
     parser.add_argument("--image", help="Path to one original angiography image.")
@@ -25,11 +26,50 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run items even when the expected output files already exist. Batch mode skips completed slices by default.",
     )
-    parser.add_argument("--radius-search-range", type=float, default=110.0, help="Radius search range used by the radius estimator.")
-    parser.add_argument("--segmentation-distance-threshold", type=float, default=8.0, help="Distance threshold for filtering nearby segmentation points.")
-    parser.add_argument("--stenosis-threshold", type=float, default=0.25, help="Threshold used for stenosis degree filtering.")
-    parser.add_argument("--average-radius-threshold", type=float, default=4.0, help="Average path radius threshold used for stenosis filtering.")
-    parser.add_argument("--final-point-distance-threshold", type=float, default=10.0, help="Distance threshold used during final stenosis point filtering.")
+    parser.add_argument("--mask-threshold", type=int, default=defaults.mask_threshold, help="Threshold used to binarize vessel masks.")
+    parser.add_argument("--min-component-area", type=int, default=defaults.min_component_area, help="Minimum connected-component area retained in vessel masks.")
+    parser.add_argument(
+        "--remove-border-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.remove_border_artifacts,
+        help="Remove long, thin connected components touching mask borders. Use --no-remove-border-artifacts to disable.",
+    )
+    parser.add_argument("--border-margin-px", type=int, default=defaults.border_margin_px, help="Border margin used when detecting mask artifacts.")
+    parser.add_argument(
+        "--border-artifact-max-height",
+        type=int,
+        default=defaults.border_artifact_max_height,
+        help="Maximum component height for long, thin border artifact removal.",
+    )
+    parser.add_argument(
+        "--border-artifact-min-width-ratio",
+        type=float,
+        default=defaults.border_artifact_min_width_ratio,
+        help="Minimum component width as a fraction of image width for border artifact removal.",
+    )
+    parser.add_argument("--radius-search-range", type=float, default=defaults.radius_search_range, help="Radius search range used by the radius estimator.")
+    parser.add_argument(
+        "--radius-vessel-threshold",
+        type=int,
+        default=defaults.radius_vessel_threshold,
+        help="Pixel threshold used to treat sampled radius points as vessel.",
+    )
+    parser.add_argument(
+        "--radius-outside-fraction-threshold",
+        type=float,
+        default=defaults.radius_outside_fraction_threshold,
+        help="Minimum outside-pixel fraction needed to stop radius search.",
+    )
+    parser.add_argument(
+        "--radius-min-outside-samples",
+        type=int,
+        default=defaults.radius_min_outside_samples,
+        help="Minimum outside-pixel sample count needed to stop radius search.",
+    )
+    parser.add_argument("--segmentation-distance-threshold", type=float, default=defaults.segmentation_distance_threshold, help="Distance threshold for filtering nearby segmentation points.")
+    parser.add_argument("--stenosis-threshold", type=float, default=defaults.stenosis_threshold, help="Threshold used for stenosis degree filtering.")
+    parser.add_argument("--average-radius-threshold", type=float, default=defaults.average_radius_threshold, help="Average path radius threshold used for stenosis filtering.")
+    parser.add_argument("--final-point-distance-threshold", type=float, default=defaults.final_point_distance_threshold, help="Distance threshold used during final stenosis point filtering.")
     return parser
 
 
@@ -37,13 +77,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    config = PipelineConfig(
-        radius_search_range=args.radius_search_range,
-        segmentation_distance_threshold=args.segmentation_distance_threshold,
-        stenosis_threshold=args.stenosis_threshold,
-        average_radius_threshold=args.average_radius_threshold,
-        final_point_distance_threshold=args.final_point_distance_threshold,
-    )
+    config = _build_pipeline_config(args)
 
     single_mode = args.image or args.mask or args.output_dir
     batch_mode = args.images_root or args.masks_root or args.output_root
@@ -100,3 +134,22 @@ def _validate_batch_mode(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error(f"Tree mode requires --images-root, --masks-root, and --output-root. Missing: {', '.join('--' + item.replace('_', '-') for item in missing)}")
     if args.show:
         parser.error("--show is only supported in single-image mode.")
+
+
+def _build_pipeline_config(args: argparse.Namespace) -> PipelineConfig:
+    return PipelineConfig(
+        mask_threshold=args.mask_threshold,
+        min_component_area=args.min_component_area,
+        remove_border_artifacts=args.remove_border_artifacts,
+        border_margin_px=args.border_margin_px,
+        border_artifact_max_height=args.border_artifact_max_height,
+        border_artifact_min_width_ratio=args.border_artifact_min_width_ratio,
+        radius_search_range=args.radius_search_range,
+        radius_vessel_threshold=args.radius_vessel_threshold,
+        radius_outside_fraction_threshold=args.radius_outside_fraction_threshold,
+        radius_min_outside_samples=args.radius_min_outside_samples,
+        segmentation_distance_threshold=args.segmentation_distance_threshold,
+        stenosis_threshold=args.stenosis_threshold,
+        average_radius_threshold=args.average_radius_threshold,
+        final_point_distance_threshold=args.final_point_distance_threshold,
+    )

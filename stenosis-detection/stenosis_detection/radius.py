@@ -14,8 +14,19 @@ def _radius_steps(search_radius: float) -> np.ndarray:
     return np.arange(1.0, float(search_radius) + 0.5, 0.5, dtype=np.float64)
 
 
-def MoMforSeg1(row_center: int, col_center: int, search_radius: float, image: np.ndarray) -> float:
+def MoMforSeg1(
+    row_center: int,
+    col_center: int,
+    search_radius: float,
+    image: np.ndarray,
+    vessel_threshold: int = 127,
+    outside_fraction_threshold: float = 0.05,
+    min_outside_samples: int = 3,
+) -> float:
     rows, cols = image.shape[:2]
+    flat_image = image.reshape(-1)
+    required_outside_fraction = max(0.0, float(outside_fraction_threshold))
+    required_outside_samples = max(1, int(min_outside_samples))
 
     for radius in _radius_steps(search_radius):
         row_positions = row_center + radius * COSINE_SAMPLES
@@ -33,8 +44,12 @@ def MoMforSeg1(row_center: int, col_center: int, search_radius: float, image: np
         if not np.any(valid):
             continue
 
-        sampled_values = image[row_indices[valid] - 1, col_indices[valid] - 1]
-        if np.any(sampled_values != 255):
+        sampled_positions = ((row_indices[valid] - 1) * cols) + (col_indices[valid] - 1)
+        sampled_values = flat_image[np.unique(sampled_positions)]
+        outside_count = int(np.count_nonzero(sampled_values < vessel_threshold))
+        outside_fraction = outside_count / float(len(sampled_values))
+
+        if outside_count >= required_outside_samples and outside_fraction >= required_outside_fraction:
             return abs(float(radius))
 
     return 100.0
@@ -44,13 +59,24 @@ def build_point_data(
     skeleton_points_rc: np.ndarray,
     mask_gray: np.ndarray,
     search_radius: float,
+    vessel_threshold: int = 127,
+    outside_fraction_threshold: float = 0.05,
+    min_outside_samples: int = 3,
 ) -> dict[tuple[int, int], float]:
     point_data: dict[tuple[int, int], float] = {}
 
     for row, col in skeleton_points_rc:
         row_int = int(row)
         col_int = int(col)
-        point_data[(row_int, col_int)] = MoMforSeg1(row_int, col_int, search_radius, mask_gray)
+        point_data[(row_int, col_int)] = MoMforSeg1(
+            row_int,
+            col_int,
+            search_radius,
+            mask_gray,
+            vessel_threshold,
+            outside_fraction_threshold,
+            min_outside_samples,
+        )
 
     return point_data
 
