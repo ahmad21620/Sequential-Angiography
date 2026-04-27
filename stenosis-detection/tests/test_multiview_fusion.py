@@ -64,6 +64,8 @@ class MultiViewFusionTests(unittest.TestCase):
             case_root = temp_root / "cases" / "case_a"
             output_root = temp_root / "outputs"
             case_root.mkdir(parents=True)
+            (case_root / "view_01").mkdir()
+            (case_root / "view_01" / "slice_0001.png").write_bytes(b"placeholder")
             (case_root / "views.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
             exit_code = multiview_cli._run_tree_mode(
@@ -100,6 +102,8 @@ class MultiViewFusionTests(unittest.TestCase):
             temp_root = Path(temp_dir)
             case_input_path = temp_root / "views.json"
             temporal_output_path = temp_root / "view_01_temporal_fusion.json"
+            (temp_root / "view_01").mkdir()
+            (temp_root / "view_01" / "slice_0001.png").write_bytes(b"placeholder")
             case_input_path.write_text(json.dumps(case_payload, indent=2), encoding="utf-8")
             temporal_output_path.write_text(json.dumps(temporal_payload, indent=2), encoding="utf-8")
 
@@ -108,6 +112,24 @@ class MultiViewFusionTests(unittest.TestCase):
             self.assertEqual(loaded_case.case_id, "case_single_view")
             self.assertEqual(loaded_case.views[0].view_input.view_id, "view_01")
             self.assertEqual(loaded_case.views[0].view_input.sequence_id, "seq_01")
+
+    def test_loader_skips_views_missing_from_case_root_when_view_dirs_exist(self) -> None:
+        fixture_dir = self._fixture_dir("distinct_support_case")
+        payload = json.loads((fixture_dir / "multiview_input.json").read_text(encoding="utf-8"))
+        for view in payload["views"]:
+            view["temporal_fusion_json"] = str((fixture_dir / view["temporal_fusion_json"]).resolve())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_root = Path(temp_dir)
+            existing_view_dir = case_root / "view_01"
+            existing_view_dir.mkdir()
+            (existing_view_dir / "slice_0001.png").write_bytes(b"placeholder")
+            (case_root / "views.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            loaded_case = load_multiview_case(case_root / "views.json")
+
+            self.assertEqual(loaded_case.case_id, "case_distinct_support")
+            self.assertEqual([view.view_input.view_id for view in loaded_case.views], ["view_01"])
 
     def test_single_view_case_returns_valid_case_result_with_lower_confidence(self) -> None:
         case_result = run_multiview_fusion(self._load_case("single_view_case"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from math import isfinite
 from pathlib import Path
+import sys
 from typing import Any
 
 from .models import (
@@ -16,6 +17,9 @@ from .models import (
 
 class MultiViewLoadError(ValueError):
     pass
+
+
+SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
 def load_multiview_case_input(case_input_path: str | Path) -> MultiViewCaseInput:
@@ -72,9 +76,10 @@ def load_multiview_view_result(view_input: MultiViewViewInput) -> LoadedMultiVie
 def load_multiview_case(case_input_path: str | Path) -> LoadedMultiViewCase:
     """Load one case input plus all referenced temporal fusion outputs."""
     case_input = load_multiview_case_input(case_input_path)
+    available_views = _filter_available_views(case_input.views, case_input_path=Path(case_input_path))
     return LoadedMultiViewCase(
         case_id=case_input.case_id,
-        views=[load_multiview_view_result(view_input) for view_input in case_input.views],
+        views=[load_multiview_view_result(view_input) for view_input in available_views],
     )
 
 
@@ -159,6 +164,104 @@ def _validate_unique_view_ids(views: list[MultiViewViewInput], *, context: str) 
         if view.view_id in seen_view_ids:
             raise MultiViewLoadError(f"{context}: duplicate view_id '{view.view_id}' is not allowed.")
         seen_view_ids.add(view.view_id)
+
+
+def _filter_available_views(
+    views: list[MultiViewViewInput],
+    *,
+    case_input_path: Path,
+) -> list[MultiViewViewInput]:
+    case_root = case_input_path.parent
+    case_view_keys = _discover_case_view_directory_keys(case_root)
+    enforce_case_view_match = (
+        case_input_path.name.lower() == "views.json"
+        or any(_view_matches_case_directory(view, case_view_keys) for view in views)
+    )
+
+    available_views: list[MultiViewViewInput] = []
+    for view in views:
+        if enforce_case_view_match and not _view_matches_case_directory(view, case_view_keys):
+            _warn_skipped_view(
+                view,
+                f"matching view folder not found under case root: {case_root}",
+            )
+            continue
+        if not view.temporal_fusion_json_path.is_file():
+            _warn_skipped_view(
+                view,
+                f"temporal fusion JSON not found: {view.temporal_fusion_json_path}",
+            )
+            continue
+        available_views.append(view)
+
+    if not available_views:
+        raise MultiViewLoadError(
+            f"{case_input_path}: no usable views were found. "
+            "Check that listed views still exist in the case and have temporal fusion JSON outputs."
+        )
+
+    return available_views
+
+
+def _warn_skipped_view(view: MultiViewViewInput, reason: str) -> None:
+    print(f"Warning: skipping view '{view.view_id}': {reason}", file=sys.stderr)
+
+
+def _discover_case_view_directory_keys(case_root: Path) -> set[str]:
+    if not case_root.is_dir():
+        return set()
+
+    keys: set[str] = set()
+    for directory in _iter_case_image_directories(case_root):
+        relative_directory = _normalize_view_identifier(directory.relative_to(case_root).as_posix())
+        keys.add(relative_directory)
+        keys.add(_normalize_view_identifier(directory.name))
+
+        if directory.name.lower() == "frames" and directory.parent != case_root:
+            relative_parent = _normalize_view_identifier(directory.parent.relative_to(case_root).as_posix())
+            keys.add(relative_parent)
+            keys.add(_normalize_view_identifier(directory.parent.name))
+
+    return {key for key in keys if key}
+
+
+def _iter_case_image_directories(case_root: Path):
+    for directory in case_root.rglob("*"):
+        if not directory.is_dir():
+            continue
+        if _directory_contains_supported_images(directory):
+            yield directory
+
+
+def _directory_contains_supported_images(directory: Path) -> bool:
+    try:
+        return any(
+            child.is_file() and child.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+            for child in directory.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _view_matches_case_directory(view: MultiViewViewInput, case_view_keys: set[str]) -> bool:
+    if not case_view_keys:
+        return False
+    return any(identifier in case_view_keys for identifier in _view_directory_identifiers(view))
+
+
+def _view_directory_identifiers(view: MultiViewViewInput) -> set[str]:
+    identifiers: set[str] = set()
+    for raw_identifier in (view.view_id, view.sequence_id):
+        normalized_identifier = _normalize_view_identifier(raw_identifier)
+        if not normalized_identifier:
+            continue
+        identifiers.add(normalized_identifier)
+        identifiers.add(normalized_identifier.rsplit("/", 1)[-1])
+    return identifiers
+
+
+def _normalize_view_identifier(identifier: str) -> str:
+    return identifier.replace("\\", "/").strip("/")
 
 
 def _resolve_temporal_fusion_json_path(base_dir: Path, raw_path: str) -> Path:
