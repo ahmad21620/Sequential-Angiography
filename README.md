@@ -16,10 +16,12 @@ project-root/
 |-- pyproject.toml
 |-- requirements.txt
 |-- docs/
+|   |-- BENCHMARKING.md
 |   `-- PIPELINE.md
 |-- scripts/
 |   |-- _wrapper_utils.py
 |   |-- run_keyframes.py
+|   |-- run_benchmark.py
 |   |-- run_segmentation.py
 |   |-- run_stenosis_detection.py
 |   |-- run_temporal_fusion.py
@@ -151,6 +153,15 @@ python scripts/run_multiview_fusion.py ^
 
 Detailed input/output layout and troubleshooting notes are available in `docs/PIPELINE.md`.
 
+## Benchmarking
+
+The stenosis package includes weak-label benchmarking utilities for existing
+frame, temporal, and multi-view JSON outputs. These tools compare pipeline
+predictions against case-level EHR weak labels without rerunning inference.
+
+See `docs/BENCHMARKING.md` for label format, interpretation notes, output
+files, threshold sweeps, and example commands.
+
 ## Tests And Smoke Checks
 
 From the repository root:
@@ -170,6 +181,7 @@ python scripts/run_segmentation.py --help
 python scripts/run_stenosis_detection.py --help
 python scripts/run_temporal_fusion.py --help
 python scripts/run_multiview_fusion.py --help
+python scripts/run_benchmark.py --help
 ```
 
 ## CUDA OpenCV Requirement
