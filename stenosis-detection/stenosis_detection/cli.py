@@ -19,6 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--images-root", help="Root directory containing original images in a nested tree.")
     parser.add_argument("--masks-root", help="Root directory containing mask images in a mirrored nested tree.")
     parser.add_argument("--output-root", help="Root directory where mirrored batch outputs will be written.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Parallel worker processes for batch mode. Use 0 for all CPU cores; use 1 for serial processing.",
+    )
 
     parser.add_argument("--show", action="store_true", help="Display generated figures after saving them. Single-image mode only.")
     parser.add_argument(
@@ -77,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.workers < 0:
+        parser.error("--workers must be 0 or greater.")
 
     config = _build_pipeline_config(args)
 
@@ -112,10 +120,12 @@ def main() -> int:
         masks_root=args.masks_root,
         config=config,
         skip_existing=not args.overwrite,
+        workers=args.workers,
     )
 
     print("Batch stenosis detection completed.")
     print(f"Total slices discovered: {summary.total_jobs}")
+    print(f"Workers: {summary.workers}")
     print(f"Processed: {summary.processed}")
     print(f"Skipped existing: {summary.skipped_existing}")
     print(f"Failed: {summary.failed}")

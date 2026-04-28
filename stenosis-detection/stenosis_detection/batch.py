@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -72,6 +74,7 @@ class BatchProcessSummary:
     masks_root: Path
     output_root: Path
     total_jobs: int
+    workers: int
     processed: int
     skipped_existing: int
     failed: int
@@ -83,6 +86,7 @@ class BatchProcessSummary:
             "masks_root": str(self.masks_root),
             "output_root": str(self.output_root),
             "total_jobs": self.total_jobs,
+            "workers": self.workers,
             "processed": self.processed,
             "skipped_existing": self.skipped_existing,
             "failed": self.failed,
@@ -144,48 +148,67 @@ def process_tree(
     masks_root: str | Path,
     config: PipelineConfig | None = None,
     skip_existing: bool = True,
+    workers: int = 1,
 ) -> BatchProcessSummary:
     pipeline_config = config or PipelineConfig()
+    worker_count = _resolve_worker_count(workers)
     resolved_output_root = Path(output_root)
     resolved_output_root.mkdir(parents=True, exist_ok=True)
 
     processed = 0
-    skipped_existing = 0
+    pending_jobs = _filter_pending_jobs(jobs, resolved_output_root, skip_existing)
+    skipped_existing = len(jobs) - len(pending_jobs)
     failures: list[BatchFailure] = []
 
     with tqdm(total=len(jobs), desc="Processing slices", unit="slice", dynamic_ncols=True) as progress:
-        for job in jobs:
-            output_dir = resolved_output_root / job.relative_dir
-            expected_outputs = build_output_paths(output_dir, file_prefix=job.image_stem)
+        if skipped_existing:
+            progress.update(skipped_existing)
+            progress.set_postfix(processed=processed, skipped=skipped_existing, failed=len(failures))
 
-            if skip_existing and all(path.exists() for path in expected_outputs.values()):
-                skipped_existing += 1
+        if worker_count == 1:
+            for job in pending_jobs:
+                failure = _process_tree_job(job, resolved_output_root, pipeline_config)
+                if failure is None:
+                    processed += 1
+                else:
+                    failures.append(failure)
+                    progress.write(f"Failed: {job.image_path} -> {failure.error}")
+
                 progress.update(1)
                 progress.set_postfix(processed=processed, skipped=skipped_existing, failed=len(failures))
-                continue
+        elif pending_jobs:
+            future_to_job = {}
+            with ProcessPoolExecutor(max_workers=worker_count, initializer=_prepare_worker_process) as executor:
+                for job in pending_jobs:
+                    future = executor.submit(_process_tree_job, job, resolved_output_root, pipeline_config)
+                    future_to_job[future] = job
 
-            try:
-                result = run_stenosis_detection(job.image_path, job.mask_path, config=pipeline_config)
-                save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
-                processed += 1
-            except Exception as exc:  # pragma: no cover - depends on input data.
-                failures.append(
-                    BatchFailure(
-                        image_path=str(job.image_path),
-                        mask_path=str(job.mask_path),
-                        error=str(exc),
-                    )
-                )
-                progress.write(f"Failed: {job.image_path} -> {exc}")
+                for future in as_completed(future_to_job):
+                    job = future_to_job[future]
+                    try:
+                        failure = future.result()
+                    except Exception as exc:  # pragma: no cover - protects parent process progress.
+                        failure = BatchFailure(
+                            image_path=str(job.image_path),
+                            mask_path=str(job.mask_path),
+                            error=str(exc),
+                        )
 
-            progress.update(1)
-            progress.set_postfix(processed=processed, skipped=skipped_existing, failed=len(failures))
+                    if failure is None:
+                        processed += 1
+                    else:
+                        failures.append(failure)
+                        progress.write(f"Failed: {job.image_path} -> {failure.error}")
+
+                    progress.update(1)
+                    progress.set_postfix(processed=processed, skipped=skipped_existing, failed=len(failures))
 
     summary = BatchProcessSummary(
         images_root=Path(images_root),
         masks_root=Path(masks_root),
         output_root=resolved_output_root,
         total_jobs=len(jobs),
+        workers=worker_count,
         processed=processed,
         skipped_existing=skipped_existing,
         failed=len(failures),
@@ -232,3 +255,47 @@ def _build_mask_index(masks_root: Path) -> dict[tuple[str, str], Path]:
         mask_index[key] = path
 
     return mask_index
+
+
+def _resolve_worker_count(workers: int) -> int:
+    if workers < 0:
+        raise ValueError("workers must be 0 or greater")
+    if workers == 0:
+        return max(1, os.cpu_count() or 1)
+    return workers
+
+
+def _filter_pending_jobs(jobs: list[TreeProcessingJob], output_root: Path, skip_existing: bool) -> list[TreeProcessingJob]:
+    if not skip_existing:
+        return jobs
+
+    pending_jobs: list[TreeProcessingJob] = []
+    for job in jobs:
+        output_dir = output_root / job.relative_dir
+        expected_outputs = build_output_paths(output_dir, file_prefix=job.image_stem)
+        if not all(path.exists() for path in expected_outputs.values()):
+            pending_jobs.append(job)
+    return pending_jobs
+
+
+def _prepare_worker_process() -> None:
+    try:
+        import cv2
+
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
+
+def _process_tree_job(job: TreeProcessingJob, output_root: Path, config: PipelineConfig) -> BatchFailure | None:
+    try:
+        output_dir = output_root / job.relative_dir
+        result = run_stenosis_detection(job.image_path, job.mask_path, config=config)
+        save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
+    except Exception as exc:  # pragma: no cover - depends on input data.
+        return BatchFailure(
+            image_path=str(job.image_path),
+            mask_path=str(job.mask_path),
+            error=str(exc),
+        )
+    return None

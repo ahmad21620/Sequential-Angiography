@@ -59,6 +59,12 @@ class StenosisDetectionCliTests(unittest.TestCase):
         self.assertEqual(config.radius_min_outside_samples, 9)
         self.assertEqual(config.branch_point_exclusion_distance, 6.5)
 
+    def test_parser_accepts_workers_option(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["--workers", "4"])
+
+        self.assertEqual(args.workers, 4)
+
 
 if __name__ == "__main__":
     unittest.main()
