@@ -33,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run items even when the expected output files already exist. Batch mode skips completed slices by default.",
     )
+    parser.add_argument(
+        "--no-debug-images",
+        action="store_true",
+        help="Write only '*_stenosis_results.json' outputs and skip PNG debug images.",
+    )
     parser.add_argument("--mask-threshold", type=int, default=defaults.mask_threshold, help="Threshold used to binarize vessel masks.")
     parser.add_argument("--min-component-area", type=int, default=defaults.min_component_area, help="Minimum connected-component area retained in vessel masks.")
     parser.add_argument(
@@ -88,8 +93,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.workers < 0:
         parser.error("--workers must be 0 or greater.")
+    if args.show and args.no_debug_images:
+        parser.error("--show cannot be used with --no-debug-images.")
 
     config = _build_pipeline_config(args)
+    write_debug_images = not args.no_debug_images
     try:
         threshold_variants = _build_threshold_variants(args, config)
     except ValueError as exc:
@@ -111,7 +119,12 @@ def main() -> int:
                 mask_path=Path(args.mask),
                 config=config,
             )
-            output_files = save_detection_outputs(result, Path(args.output_dir), show=args.show)
+            output_files = save_detection_outputs(
+                result,
+                Path(args.output_dir),
+                show=args.show,
+                write_debug_images=write_debug_images,
+            )
 
             print("Stenosis detection completed.")
             print(f"Detected stenosis points: {len(result.stenosis_points_xy)}")
@@ -129,6 +142,7 @@ def main() -> int:
                     result,
                     Path(args.output_dir) / variant_name,
                     show=args.show,
+                    write_debug_images=write_debug_images,
                 )
                 print(f"{variant_name}: {len(result.stenosis_points_xy)} stenosis points")
                 for name, path in output_files.items():
@@ -146,6 +160,7 @@ def main() -> int:
         skip_existing=not args.overwrite,
         workers=args.workers,
         threshold_variants=threshold_variants,
+        write_debug_images=write_debug_images,
     )
 
     print("Batch stenosis detection completed.")
@@ -153,6 +168,7 @@ def main() -> int:
     print(f"Workers: {summary.workers}")
     if threshold_variants is not None:
         print(f"Threshold variants: {len(threshold_variants)}")
+    print(f"Debug images: {'yes' if write_debug_images else 'no'}")
     print(f"Processed: {summary.processed}")
     print(f"Skipped existing: {summary.skipped_existing}")
     print(f"Failed: {summary.failed}")

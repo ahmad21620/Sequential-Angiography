@@ -20,10 +20,41 @@ def save_detection_outputs(
     *,
     show: bool = False,
     file_prefix: str | None = None,
+    write_debug_images: bool = True,
 ) -> dict[str, Path]:
+    if show and not write_debug_images:
+        raise ValueError("Interactive display requires debug images.")
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    output_files = build_output_paths(output_path, file_prefix=file_prefix)
+    output_files["results_json"].write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
 
+    if not write_debug_images:
+        return {"results_json": output_files["results_json"]}
+
+    debug_images = _build_debug_images(result)
+
+    cv2.imwrite(str(output_files["loaded_mask"]), debug_images["loaded_mask"])
+    cv2.imwrite(str(output_files["cleaned_mask"]), debug_images["cleaned_mask"])
+    cv2.imwrite(str(output_files["centerline"]), debug_images["centerline"])
+    cv2.imwrite(str(output_files["segmentation_points"]), debug_images["segmentation_points"])
+    cv2.imwrite(str(output_files["stenosis_mask"]), debug_images["stenosis_mask"])
+    cv2.imwrite(str(output_files["stenosis_original"]), debug_images["stenosis_original"])
+    cv2.imwrite(str(output_files["radius_debug"]), debug_images["radius_debug"])
+
+    if show:
+        _show_outputs(
+            centerline_image=debug_images["centerline"],
+            segmentation_image=debug_images["segmentation_points"],
+            stenosis_mask_image=debug_images["stenosis_mask"],
+            stenosis_original_image=debug_images["stenosis_original"],
+        )
+
+    return output_files
+
+
+def _build_debug_images(result: StenosisDetectionResult) -> dict[str, np.ndarray]:
     loaded_mask_image = _to_bgr_canvas(result.original_mask_gray)
     cleaned_mask_image = _to_bgr_canvas(result.mask_gray)
     centerline_image = create_centerline_visualization(result.mask_gray, result.skeleton_points_xy)
@@ -44,27 +75,15 @@ def save_detection_outputs(
         result.stenosis_degrees,
     )
     radius_debug_image = create_radius_debug_visualization(result.mask_gray, result.point_data)
-
-    output_files = build_output_paths(output_path, file_prefix=file_prefix)
-
-    cv2.imwrite(str(output_files["loaded_mask"]), loaded_mask_image)
-    cv2.imwrite(str(output_files["cleaned_mask"]), cleaned_mask_image)
-    cv2.imwrite(str(output_files["centerline"]), centerline_image)
-    cv2.imwrite(str(output_files["segmentation_points"]), segmentation_image)
-    cv2.imwrite(str(output_files["stenosis_mask"]), stenosis_mask_image)
-    cv2.imwrite(str(output_files["stenosis_original"]), stenosis_original_image)
-    cv2.imwrite(str(output_files["radius_debug"]), radius_debug_image)
-    output_files["results_json"].write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
-
-    if show:
-        _show_outputs(
-            centerline_image=centerline_image,
-            segmentation_image=segmentation_image,
-            stenosis_mask_image=stenosis_mask_image,
-            stenosis_original_image=stenosis_original_image,
-        )
-
-    return output_files
+    return {
+        "loaded_mask": loaded_mask_image,
+        "cleaned_mask": cleaned_mask_image,
+        "centerline": centerline_image,
+        "segmentation_points": segmentation_image,
+        "stenosis_mask": stenosis_mask_image,
+        "stenosis_original": stenosis_original_image,
+        "radius_debug": radius_debug_image,
+    }
 
 
 def build_output_paths(output_dir: str | Path, *, file_prefix: str | None = None) -> dict[str, Path]:

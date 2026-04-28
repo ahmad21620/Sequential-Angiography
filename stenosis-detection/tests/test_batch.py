@@ -43,6 +43,7 @@ class BatchProcessingTests(unittest.TestCase):
                     config=PipelineConfig(),
                     workers=1,
                     threshold_variants=variants,
+                    write_debug_images=False,
                 )
 
         self.assertEqual(summary.processed, 1)
@@ -57,6 +58,7 @@ class BatchProcessingTests(unittest.TestCase):
                 output_root / "stenosis_threshold_0p3__average_radius_threshold_4" / "case_001" / "view_01",
             ],
         )
+        self.assertTrue(all(call.kwargs["write_debug_images"] is False for call in save_outputs.call_args_list))
 
 
 if __name__ == "__main__":

@@ -80,6 +80,7 @@ class BatchProcessSummary:
     failed: int
     failures: list[BatchFailure]
     threshold_variants: list[str] | None = None
+    debug_images_saved: bool = True
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -92,6 +93,7 @@ class BatchProcessSummary:
             "skipped_existing": self.skipped_existing,
             "failed": self.failed,
             "failures": [asdict(failure) for failure in self.failures],
+            "debug_images_saved": self.debug_images_saved,
         }
         if self.threshold_variants is not None:
             payload["threshold_variants"] = list(self.threshold_variants)
@@ -154,6 +156,7 @@ def process_tree(
     skip_existing: bool = True,
     workers: int = 1,
     threshold_variants: list[tuple[str, PipelineConfig]] | None = None,
+    write_debug_images: bool = True,
 ) -> BatchProcessSummary:
     pipeline_config = config or PipelineConfig()
     worker_count = _resolve_worker_count(workers)
@@ -161,7 +164,13 @@ def process_tree(
     resolved_output_root.mkdir(parents=True, exist_ok=True)
 
     processed = 0
-    pending_jobs = _filter_pending_jobs(jobs, resolved_output_root, skip_existing, threshold_variants)
+    pending_jobs = _filter_pending_jobs(
+        jobs,
+        resolved_output_root,
+        skip_existing,
+        threshold_variants,
+        write_debug_images,
+    )
     skipped_existing = len(jobs) - len(pending_jobs)
     failures: list[BatchFailure] = []
 
@@ -172,7 +181,13 @@ def process_tree(
 
         if worker_count == 1:
             for job in pending_jobs:
-                failure = _process_tree_job(job, resolved_output_root, pipeline_config, threshold_variants)
+                failure = _process_tree_job(
+                    job,
+                    resolved_output_root,
+                    pipeline_config,
+                    threshold_variants,
+                    write_debug_images,
+                )
                 if failure is None:
                     processed += 1
                 else:
@@ -191,6 +206,7 @@ def process_tree(
                         resolved_output_root,
                         pipeline_config,
                         threshold_variants,
+                        write_debug_images,
                     )
                     future_to_job[future] = job
 
@@ -225,6 +241,7 @@ def process_tree(
         failed=len(failures),
         failures=failures,
         threshold_variants=None if threshold_variants is None else [name for name, _ in threshold_variants],
+        debug_images_saved=write_debug_images,
     )
 
     (resolved_output_root / "batch_summary.json").write_text(
@@ -282,13 +299,14 @@ def _filter_pending_jobs(
     output_root: Path,
     skip_existing: bool,
     threshold_variants: list[tuple[str, PipelineConfig]] | None,
+    write_debug_images: bool,
 ) -> list[TreeProcessingJob]:
     if not skip_existing:
         return jobs
 
     pending_jobs: list[TreeProcessingJob] = []
     for job in jobs:
-        expected_outputs = _build_expected_job_outputs(job, output_root, threshold_variants)
+        expected_outputs = _build_expected_job_outputs(job, output_root, threshold_variants, write_debug_images)
         if not all(path.exists() for path in expected_outputs):
             pending_jobs.append(job)
     return pending_jobs
@@ -298,16 +316,24 @@ def _build_expected_job_outputs(
     job: TreeProcessingJob,
     output_root: Path,
     threshold_variants: list[tuple[str, PipelineConfig]] | None,
+    write_debug_images: bool,
 ) -> list[Path]:
     if threshold_variants is None:
         output_dir = output_root / job.relative_dir
-        return list(build_output_paths(output_dir, file_prefix=job.image_stem).values())
+        return _expected_output_paths(output_dir, job.image_stem, write_debug_images)
 
     expected_outputs: list[Path] = []
     for variant_name, _ in threshold_variants:
         output_dir = output_root / variant_name / job.relative_dir
-        expected_outputs.extend(build_output_paths(output_dir, file_prefix=job.image_stem).values())
+        expected_outputs.extend(_expected_output_paths(output_dir, job.image_stem, write_debug_images))
     return expected_outputs
+
+
+def _expected_output_paths(output_dir: Path, file_prefix: str, write_debug_images: bool) -> list[Path]:
+    output_paths = build_output_paths(output_dir, file_prefix=file_prefix)
+    if not write_debug_images:
+        return [output_paths["results_json"]]
+    return list(output_paths.values())
 
 
 def _prepare_worker_process() -> None:
@@ -324,18 +350,31 @@ def _process_tree_job(
     output_root: Path,
     config: PipelineConfig,
     threshold_variants: list[tuple[str, PipelineConfig]] | None = None,
+    write_debug_images: bool = True,
 ) -> BatchFailure | None:
     try:
         if threshold_variants is None:
             output_dir = output_root / job.relative_dir
             result = run_stenosis_detection(job.image_path, job.mask_path, config=config)
-            save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
+            save_detection_outputs(
+                result,
+                output_dir,
+                file_prefix=job.image_stem,
+                show=False,
+                write_debug_images=write_debug_images,
+            )
         else:
             variant_configs = [variant_config for _, variant_config in threshold_variants]
             results = run_stenosis_detection_variants(job.image_path, job.mask_path, variant_configs)
             for (variant_name, _), result in zip(threshold_variants, results, strict=True):
                 output_dir = output_root / variant_name / job.relative_dir
-                save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
+                save_detection_outputs(
+                    result,
+                    output_dir,
+                    file_prefix=job.image_stem,
+                    show=False,
+                    write_debug_images=write_debug_images,
+                )
     except Exception as exc:  # pragma: no cover - depends on input data.
         return BatchFailure(
             image_path=str(job.image_path),

@@ -71,6 +71,32 @@ class VisualizationOutputTests(unittest.TestCase):
             self.assertNotIn("debug", payload)
             self.assertNotIn("point_data", payload)
 
+    def test_save_detection_outputs_can_write_json_only(self) -> None:
+        result = StenosisDetectionResult(
+            image_path=Path("slice_0001.png"),
+            mask_path=Path("slice_0001_mask.png"),
+            config=PipelineConfig(resize_height=4, resize_width=4),
+            original_image_bgr=np.zeros((4, 4, 3), dtype=np.uint8),
+            original_mask_gray=np.zeros((4, 4), dtype=np.uint8),
+            mask_gray=np.zeros((4, 4), dtype=np.uint8),
+            binary_mask=np.zeros((4, 4), dtype=bool),
+            skeleton_mask=np.zeros((4, 4), dtype=bool),
+            skeleton_points_rc=np.zeros((0, 2), dtype=np.int32),
+            skeleton_points_xy=np.zeros((0, 2), dtype=np.int32),
+            point_data={},
+            segmentation_points_xy=np.zeros((0, 2), dtype=np.int32),
+            filtered_segmentation_points_xy=np.zeros((0, 2), dtype=np.int32),
+            stenosis_points_xy=np.zeros((0, 2), dtype=np.int32),
+            stenosis_degrees=np.zeros((0,), dtype=np.float64),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_files = save_detection_outputs(result, temp_dir, write_debug_images=False)
+
+            self.assertEqual(list(output_files), ["results_json"])
+            self.assertTrue(output_files["results_json"].exists())
+            self.assertEqual(len(list(Path(temp_dir).iterdir())), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

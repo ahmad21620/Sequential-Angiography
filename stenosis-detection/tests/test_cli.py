@@ -65,6 +65,12 @@ class StenosisDetectionCliTests(unittest.TestCase):
 
         self.assertEqual(args.workers, 4)
 
+    def test_parser_accepts_no_debug_images_flag(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["--no-debug-images"])
+
+        self.assertTrue(args.no_debug_images)
+
     def test_builds_threshold_variants_from_comma_lists(self) -> None:
         parser = cli.build_parser()
         args = parser.parse_args(
