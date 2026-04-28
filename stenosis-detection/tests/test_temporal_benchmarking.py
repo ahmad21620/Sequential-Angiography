@@ -27,6 +27,7 @@ class TemporalBenchmarkingTests(unittest.TestCase):
                 results_root / "case_001" / "view_01" / "view_temporal_fusion.json",
                 view_id="view_01",
                 final_lesion={
+                    "severity": "moderate",
                     "persistence_ratio": 0.75,
                     "supporting_frame_count": 9,
                     "total_frame_count": 12,
@@ -44,6 +45,7 @@ class TemporalBenchmarkingTests(unittest.TestCase):
                 results_root / "case_002" / "view_a" / "view_temporal_fusion.json",
                 view_id="view_a",
                 final_lesion={
+                    "severity": "mild",
                     "persistence_ratio": 0.50,
                     "supporting_frame_count": 6,
                     "total_frame_count": 12,
@@ -123,6 +125,9 @@ class TemporalBenchmarkingTests(unittest.TestCase):
             summary_payload = json.loads((output_root / "temporal_sequence_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary_payload["summary"]["TP"], 1)
             self.assertIn("weak EHR labels", summary_payload["summary"]["note"])
+            self.assertEqual(summary_payload["severity_agreement"]["comparable_positive_prediction_count"], 1)
+            self.assertEqual(summary_payload["severity_agreement"]["exact_match_count"], 1)
+            self.assertEqual(summary_payload["severity_agreement"]["pipeline_severity_distribution"]["moderate"]["percent"], 100.0)
             sweep_rows = self._read_csv(output_root / "threshold_sweep_temporal.csv")
             self.assertEqual(len(sweep_rows), 42)
             sweep_summary = json.loads((output_root / "threshold_sweep_summary.json").read_text(encoding="utf-8"))
@@ -138,6 +143,7 @@ class TemporalBenchmarkingTests(unittest.TestCase):
                 results_root / "case_001" / "view_01" / "view_temporal_fusion.json",
                 view_id="view_01",
                 final_lesion={
+                    "severity": "mild",
                     "persistence_ratio": 0.20,
                     "supporting_frame_count": 2,
                     "total_frame_count": 12,

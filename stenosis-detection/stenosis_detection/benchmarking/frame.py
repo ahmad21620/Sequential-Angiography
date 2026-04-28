@@ -11,6 +11,7 @@ from .io import BenchmarkIOError
 from .labels import load_weak_labels_jsonl
 from .metrics import summarize_rows
 from .models import BenchmarkRow, BinaryMetricSummary, WeakLabel
+from .severity import severity_row_fields, summarize_severity_agreement
 from .sweep import write_threshold_sweep
 
 
@@ -239,6 +240,7 @@ def save_frame_benchmark_outputs(
             "frame_min_degree": float(frame_min_degree),
             "include_unclear_labels": include_unclear_labels,
             "summary": frame_summary.to_dict(),
+            "severity_agreement": summarize_severity_agreement(frame_rows),
         },
     )
     _write_csv(
@@ -315,6 +317,7 @@ def _build_frame_row(
         include_unclear_labels=include_unclear_labels,
     )
     frame_payload = payload.get("frame") if isinstance(payload.get("frame"), dict) else {}
+    predicted_severity = _worst_severity(stenosis_points)
 
     return {
         "case_id": case_id,
@@ -328,9 +331,15 @@ def _build_frame_row(
         "predicted_positive": predicted_positive,
         "score": max_degree,
         "max_stenosis_degree": max_degree,
-        "predicted_severity": _worst_severity(stenosis_points),
+        "predicted_severity": predicted_severity,
         "frame_min_degree": float(frame_min_degree),
         **_label_fields(label, label_target=label_target),
+        **severity_row_fields(
+            label_severity=None if label is None else label.severity,
+            pipeline_severity=predicted_severity,
+            label_target=label_target,
+            predicted_positive=predicted_positive,
+        ),
         "weak_outcome": weak_outcome,
         "skip_reason": skip_reason,
     }
@@ -660,6 +669,9 @@ FRAME_ROW_FIELDS = [
     "score",
     "max_stenosis_degree",
     "predicted_severity",
+    "pipeline_severity",
+    "weak_label_severity_normalized",
+    "severity_match",
     "frame_min_degree",
     "label_target",
     "label_status",

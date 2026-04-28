@@ -41,6 +41,8 @@ class StenosisDetectionCliTests(unittest.TestCase):
                 "0.12",
                 "--radius-min-outside-samples",
                 "9",
+                "--branch-point-exclusion-distance",
+                "6.5",
             ]
         )
 
@@ -55,6 +57,7 @@ class StenosisDetectionCliTests(unittest.TestCase):
         self.assertEqual(config.radius_vessel_threshold, 111)
         self.assertEqual(config.radius_outside_fraction_threshold, 0.12)
         self.assertEqual(config.radius_min_outside_samples, 9)
+        self.assertEqual(config.branch_point_exclusion_distance, 6.5)
 
 
 if __name__ == "__main__":

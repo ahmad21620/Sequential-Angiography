@@ -17,6 +17,7 @@ from .frame import (
 from .io import BenchmarkIOError
 from .labels import load_weak_labels_jsonl
 from .models import BinaryMetricSummary, WeakLabel
+from .severity import severity_row_fields, summarize_severity_agreement
 from .sweep import write_threshold_sweep
 
 
@@ -197,6 +198,7 @@ def save_temporal_benchmark_outputs(
             "temporal_min_persistence_ratio": float(temporal_min_persistence_ratio),
             "include_unclear_labels": include_unclear_labels,
             "summary": sequence_summary.to_dict(),
+            "severity_agreement": summarize_severity_agreement(sequence_rows),
         },
     )
     _write_csv(
@@ -260,6 +262,7 @@ def _build_sequence_row(
         and score >= temporal_min_degree
         and persistence_ratio >= temporal_min_persistence_ratio
     )
+    predicted_severity = final_lesion.get("severity") if final_lesion is not None else None
 
     label = weak_labels.get(case_id)
     weak_outcome, skip_reason, label_target = _weak_outcome(
@@ -278,12 +281,19 @@ def _build_sequence_row(
         "persistent_lesion_count": _coerce_int(fusion.get("persistent_lesion_count")),
         "score": score,
         "max_degree": max_degree,
+        "predicted_severity": predicted_severity,
         "persistence_ratio": persistence_ratio,
         "supporting_frame_count": _coerce_int(final_lesion.get("supporting_frame_count")) if final_lesion is not None else 0,
         "total_frame_count": _coerce_int(final_lesion.get("total_frame_count")) if final_lesion is not None else 0,
         "temporal_min_degree": float(temporal_min_degree),
         "temporal_min_persistence_ratio": float(temporal_min_persistence_ratio),
         **_label_fields(label, label_target=label_target),
+        **severity_row_fields(
+            label_severity=None if label is None else label.severity,
+            pipeline_severity=predicted_severity,
+            label_target=label_target,
+            predicted_positive=predicted_positive,
+        ),
         "weak_outcome": weak_outcome,
         "skip_reason": skip_reason,
     }
@@ -394,6 +404,10 @@ TEMPORAL_SEQUENCE_ROW_FIELDS = [
     "persistent_lesion_count",
     "score",
     "max_degree",
+    "predicted_severity",
+    "pipeline_severity",
+    "weak_label_severity_normalized",
+    "severity_match",
     "persistence_ratio",
     "supporting_frame_count",
     "total_frame_count",

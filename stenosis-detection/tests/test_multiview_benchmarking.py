@@ -133,6 +133,9 @@ class MultiViewBenchmarkingTests(unittest.TestCase):
             summary_payload = json.loads((output_root / "multiview_case_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary_payload["summary"]["TP"], 1)
             self.assertIn("by_pipeline_confidence_label", summary_payload["breakdowns"])
+            self.assertEqual(summary_payload["severity_agreement"]["comparable_positive_prediction_count"], 1)
+            self.assertEqual(summary_payload["severity_agreement"]["exact_match_count"], 1)
+            self.assertEqual(summary_payload["severity_agreement"]["by_weak_label_severity"]["moderate"]["exact_match_percent"], 100.0)
 
             self.assertEqual(len(self._read_csv(output_root / "true_positive_cases.csv")), 1)
             self.assertEqual(len(self._read_csv(output_root / "false_positive_cases.csv")), 1)

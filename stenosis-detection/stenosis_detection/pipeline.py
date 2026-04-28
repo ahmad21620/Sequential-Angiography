@@ -36,6 +36,7 @@ class PipelineConfig:
     stenosis_threshold: float = 0.25
     average_radius_threshold: float = 4.0
     final_point_distance_threshold: float = 10.0
+    branch_point_exclusion_distance: float = 8.0
 
 
 @dataclass(slots=True)
@@ -173,6 +174,12 @@ def run_stenosis_detection(
         raw_stenosis_points_rc,
         raw_stenosis_degrees,
         pipeline_config.final_point_distance_threshold,
+    )
+    stenosis_points_xy, stenosis_degrees = _filter_stenosis_points_near_branch_points(
+        stenosis_points_xy,
+        stenosis_degrees,
+        segmentation_points_xy,
+        pipeline_config.branch_point_exclusion_distance,
     )
 
     return StenosisDetectionResult(
@@ -656,6 +663,24 @@ def _finalize_stenosis_points(
     final_points_xy = stenosis_points_xy[keep_indices].astype(np.int32)
     final_degrees = np.asarray(raw_stenosis_degrees, dtype=np.float64)[keep_indices]
     return final_points_xy, final_degrees
+
+
+def _filter_stenosis_points_near_branch_points(
+    stenosis_points_xy: np.ndarray,
+    stenosis_degrees: np.ndarray,
+    branch_points_xy: np.ndarray,
+    exclusion_distance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(stenosis_points_xy) == 0 or len(branch_points_xy) == 0 or exclusion_distance <= 0.0:
+        return stenosis_points_xy, stenosis_degrees
+
+    keep = np.ones(len(stenosis_points_xy), dtype=bool)
+    for index, point_xy in enumerate(stenosis_points_xy):
+        distances = np.linalg.norm(branch_points_xy.astype(np.float64) - point_xy.astype(np.float64), axis=1)
+        if np.min(distances, initial=float("inf")) <= exclusion_distance:
+            keep[index] = False
+
+    return stenosis_points_xy[keep].astype(np.int32), stenosis_degrees[keep].astype(np.float64)
 
 
 def _classify_stenosis(stenosis_degree: float) -> str:

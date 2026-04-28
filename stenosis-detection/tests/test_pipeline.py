@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from stenosis_detection.pipeline import PipelineConfig, _load_mask_image
+from stenosis_detection.pipeline import PipelineConfig, _filter_stenosis_points_near_branch_points, _load_mask_image
 
 
 class PipelineMaskLoadingTests(unittest.TestCase):
@@ -145,6 +145,36 @@ class PipelineMaskLoadingTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(mask_gray, expected)
         np.testing.assert_array_equal(binary_mask, expected.astype(bool))
+
+    def test_filter_stenosis_points_near_branch_points_removes_nearby_candidates(self) -> None:
+        stenosis_points_xy = np.asarray([[10, 10], [20, 20], [40, 40]], dtype=np.int32)
+        stenosis_degrees = np.asarray([0.7, 0.8, 0.9], dtype=np.float64)
+        branch_points_xy = np.asarray([[12, 10], [35, 35]], dtype=np.int32)
+
+        filtered_points_xy, filtered_degrees = _filter_stenosis_points_near_branch_points(
+            stenosis_points_xy,
+            stenosis_degrees,
+            branch_points_xy,
+            exclusion_distance=5.0,
+        )
+
+        np.testing.assert_array_equal(filtered_points_xy, np.asarray([[20, 20], [40, 40]], dtype=np.int32))
+        np.testing.assert_array_equal(filtered_degrees, np.asarray([0.8, 0.9], dtype=np.float64))
+
+    def test_branch_point_filter_can_be_disabled(self) -> None:
+        stenosis_points_xy = np.asarray([[10, 10]], dtype=np.int32)
+        stenosis_degrees = np.asarray([0.7], dtype=np.float64)
+        branch_points_xy = np.asarray([[10, 10]], dtype=np.int32)
+
+        filtered_points_xy, filtered_degrees = _filter_stenosis_points_near_branch_points(
+            stenosis_points_xy,
+            stenosis_degrees,
+            branch_points_xy,
+            exclusion_distance=0.0,
+        )
+
+        np.testing.assert_array_equal(filtered_points_xy, stenosis_points_xy)
+        np.testing.assert_array_equal(filtered_degrees, stenosis_degrees)
 
     def _load_temp_mask(self, mask: np.ndarray, config: PipelineConfig) -> tuple[np.ndarray, np.ndarray]:
         with tempfile.TemporaryDirectory() as temp_dir:

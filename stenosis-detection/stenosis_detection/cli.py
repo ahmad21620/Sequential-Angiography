@@ -70,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stenosis-threshold", type=float, default=defaults.stenosis_threshold, help="Threshold used for stenosis degree filtering.")
     parser.add_argument("--average-radius-threshold", type=float, default=defaults.average_radius_threshold, help="Average path radius threshold used for stenosis filtering.")
     parser.add_argument("--final-point-distance-threshold", type=float, default=defaults.final_point_distance_threshold, help="Distance threshold used during final stenosis point filtering.")
+    parser.add_argument("--branch-point-exclusion-distance", type=float, default=defaults.branch_point_exclusion_distance, help="Drop stenosis candidates within this distance of detected branch points. Use 0 to disable.")
     return parser
 
 
@@ -152,4 +153,5 @@ def _build_pipeline_config(args: argparse.Namespace) -> PipelineConfig:
         stenosis_threshold=args.stenosis_threshold,
         average_radius_threshold=args.average_radius_threshold,
         final_point_distance_threshold=args.final_point_distance_threshold,
+        branch_point_exclusion_distance=args.branch_point_exclusion_distance,
     )

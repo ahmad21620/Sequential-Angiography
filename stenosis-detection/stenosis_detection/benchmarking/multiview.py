@@ -17,6 +17,7 @@ from .frame import (
 from .io import BenchmarkIOError
 from .labels import load_weak_labels_jsonl
 from .models import BinaryMetricSummary, WeakLabel
+from .severity import severity_row_fields, summarize_severity_agreement
 from .sweep import write_threshold_sweep
 from .temporal import _coerce_int
 
@@ -180,6 +181,7 @@ def save_multiview_benchmark_outputs(
             "require_distinct_supporting_view": require_distinct_supporting_view,
             "include_unclear_labels": include_unclear_labels,
             "summary": case_summary.to_dict(),
+            "severity_agreement": summarize_severity_agreement(case_rows),
             "breakdowns": breakdowns,
         },
     )
@@ -254,6 +256,7 @@ def _build_case_row(
     total_score = 0.0 if total_score is None else total_score
     confidence_score = 0.0 if confidence_score is None else confidence_score
     distinct_supporting_view_count = len(distinct_supporting_view_ids)
+    final_severity = final_case_lesion.get("severity") if final_case_lesion is not None else None
     predicted_positive = (
         final_case_lesion is not None
         and final_degree >= multiview_min_degree
@@ -274,7 +277,7 @@ def _build_case_row(
         "relative_path": relative_path.as_posix(),
         "source_path": str(result_path),
         "predicted_positive": predicted_positive,
-        "final_severity": final_case_lesion.get("severity") if final_case_lesion is not None else None,
+        "final_severity": final_severity,
         "final_degree": final_degree,
         "final_max_degree": final_max_degree,
         "total_score": total_score,
@@ -287,6 +290,12 @@ def _build_case_row(
         "multiview_min_degree": float(multiview_min_degree),
         "require_distinct_supporting_view": require_distinct_supporting_view,
         **_label_fields(label, label_target=label_target),
+        **severity_row_fields(
+            label_severity=None if label is None else label.severity,
+            pipeline_severity=final_severity,
+            label_target=label_target,
+            predicted_positive=predicted_positive,
+        ),
         "weak_outcome": weak_outcome,
         "skip_reason": skip_reason,
     }
@@ -357,6 +366,9 @@ MULTIVIEW_CASE_ROW_FIELDS = [
     "source_path",
     "predicted_positive",
     "final_severity",
+    "pipeline_severity",
+    "weak_label_severity_normalized",
+    "severity_match",
     "final_degree",
     "final_max_degree",
     "total_score",
