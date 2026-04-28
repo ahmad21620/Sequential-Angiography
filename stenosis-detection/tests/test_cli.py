@@ -65,6 +65,32 @@ class StenosisDetectionCliTests(unittest.TestCase):
 
         self.assertEqual(args.workers, 4)
 
+    def test_builds_threshold_variants_from_comma_lists(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "--stenosis-thresholds",
+                "0.2,0.3",
+                "--average-radius-thresholds",
+                "3.0,4.0",
+            ]
+        )
+
+        variants = cli._build_threshold_variants(args, cli._build_pipeline_config(args))
+
+        self.assertIsNotNone(variants)
+        self.assertEqual(
+            [name for name, _ in variants],
+            [
+                "stenosis_threshold_0p2__average_radius_threshold_3",
+                "stenosis_threshold_0p2__average_radius_threshold_4",
+                "stenosis_threshold_0p3__average_radius_threshold_3",
+                "stenosis_threshold_0p3__average_radius_threshold_4",
+            ],
+        )
+        self.assertEqual([config.stenosis_threshold for _, config in variants], [0.2, 0.2, 0.3, 0.3])
+        self.assertEqual([config.average_radius_threshold for _, config in variants], [3.0, 4.0, 3.0, 4.0])
+
 
 if __name__ == "__main__":
     unittest.main()

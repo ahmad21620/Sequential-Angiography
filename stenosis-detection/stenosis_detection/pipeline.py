@@ -121,11 +121,24 @@ def run_stenosis_detection(
     config: PipelineConfig | None = None,
 ) -> StenosisDetectionResult:
     pipeline_config = config or PipelineConfig()
+    return run_stenosis_detection_variants(image_path, mask_path, [pipeline_config])[0]
+
+
+def run_stenosis_detection_variants(
+    image_path: str | Path,
+    mask_path: str | Path,
+    configs: list[PipelineConfig],
+) -> list[StenosisDetectionResult]:
+    if not configs:
+        raise ValueError("At least one pipeline config is required.")
+    _validate_variant_configs(configs)
+
+    base_config = configs[0]
     resolved_image_path = Path(image_path)
     resolved_mask_path = Path(mask_path)
 
-    original_image_bgr = _load_original_image(resolved_image_path, pipeline_config)
-    original_mask_gray, mask_gray, binary_mask = _load_mask_image_with_debug(resolved_mask_path, pipeline_config)
+    original_image_bgr = _load_original_image(resolved_image_path, base_config)
+    original_mask_gray, mask_gray, binary_mask = _load_mask_image_with_debug(resolved_mask_path, base_config)
 
     skeleton_mask = thin_binary_mask(binary_mask)
     skeleton_points_rc = _skeleton_points_rc(skeleton_mask)
@@ -134,20 +147,21 @@ def run_stenosis_detection(
     point_data = build_point_data(
         skeleton_points_rc,
         mask_gray,
-        pipeline_config.radius_search_range,
-        vessel_threshold=pipeline_config.radius_vessel_threshold,
-        outside_fraction_threshold=pipeline_config.radius_outside_fraction_threshold,
-        min_outside_samples=pipeline_config.radius_min_outside_samples,
+        base_config.radius_search_range,
+        vessel_threshold=base_config.radius_vessel_threshold,
+        outside_fraction_threshold=base_config.radius_outside_fraction_threshold,
+        min_outside_samples=base_config.radius_min_outside_samples,
     )
 
     segmentation_points_xy = _detect_segmentation_points(skeleton_mask, skeleton_points_rc)
     filtered_segmentation_points_xy = _filter_nearby_segmentation_points(
         segmentation_points_xy,
-        pipeline_config.segmentation_distance_threshold,
+        base_config.segmentation_distance_threshold,
     )
 
     raw_stenosis_points_rc: list[tuple[int, int]] = []
     raw_stenosis_degrees: list[float] = []
+    raw_average_radii: list[float] = []
 
     for index in range(len(filtered_segmentation_points_xy) - 1):
         start_point = filtered_segmentation_points_xy[index]
@@ -160,45 +174,57 @@ def run_stenosis_detection(
 
         average_radius = _average_path_radius(shortest_path_rc, shortest_path_length, point_data)
         queue_rc = collect_queue(shortest_path_rc, point_data)
-        middle_points_rc, stenosis_degrees = _detect_stenosis_from_queue(
+        middle_points_rc, stenosis_degrees = _detect_stenosis_candidates_from_queue(
             queue_rc,
             average_radius,
             point_data,
-            pipeline_config,
         )
 
         raw_stenosis_points_rc.extend((int(point[0]), int(point[1])) for point in middle_points_rc)
         raw_stenosis_degrees.extend(float(value) for value in stenosis_degrees)
+        raw_average_radii.extend(float(average_radius) for _ in range(len(middle_points_rc)))
 
-    stenosis_points_xy, stenosis_degrees = _finalize_stenosis_points(
-        raw_stenosis_points_rc,
-        raw_stenosis_degrees,
-        pipeline_config.final_point_distance_threshold,
-    )
-    stenosis_points_xy, stenosis_degrees = _filter_stenosis_points_near_branch_points(
-        stenosis_points_xy,
-        stenosis_degrees,
-        segmentation_points_xy,
-        pipeline_config.branch_point_exclusion_distance,
-    )
+    results: list[StenosisDetectionResult] = []
+    for variant_config in configs:
+        stenosis_points_rc, stenosis_degrees = _filter_stenosis_candidates(
+            raw_stenosis_points_rc,
+            raw_stenosis_degrees,
+            raw_average_radii,
+            variant_config,
+        )
+        stenosis_points_xy, stenosis_degrees = _finalize_stenosis_points(
+            stenosis_points_rc,
+            stenosis_degrees,
+            variant_config.final_point_distance_threshold,
+        )
+        stenosis_points_xy, stenosis_degrees = _filter_stenosis_points_near_branch_points(
+            stenosis_points_xy,
+            stenosis_degrees,
+            segmentation_points_xy,
+            variant_config.branch_point_exclusion_distance,
+        )
 
-    return StenosisDetectionResult(
-        image_path=resolved_image_path,
-        mask_path=resolved_mask_path,
-        config=pipeline_config,
-        original_image_bgr=original_image_bgr,
-        original_mask_gray=original_mask_gray,
-        mask_gray=mask_gray,
-        binary_mask=binary_mask,
-        skeleton_mask=skeleton_mask,
-        skeleton_points_rc=skeleton_points_rc,
-        skeleton_points_xy=skeleton_points_xy,
-        point_data=point_data,
-        segmentation_points_xy=segmentation_points_xy,
-        filtered_segmentation_points_xy=filtered_segmentation_points_xy,
-        stenosis_points_xy=stenosis_points_xy,
-        stenosis_degrees=stenosis_degrees,
-    )
+        results.append(
+            StenosisDetectionResult(
+                image_path=resolved_image_path,
+                mask_path=resolved_mask_path,
+                config=variant_config,
+                original_image_bgr=original_image_bgr,
+                original_mask_gray=original_mask_gray,
+                mask_gray=mask_gray,
+                binary_mask=binary_mask,
+                skeleton_mask=skeleton_mask,
+                skeleton_points_rc=skeleton_points_rc,
+                skeleton_points_xy=skeleton_points_xy,
+                point_data=point_data,
+                segmentation_points_xy=segmentation_points_xy,
+                filtered_segmentation_points_xy=filtered_segmentation_points_xy,
+                stenosis_points_xy=stenosis_points_xy,
+                stenosis_degrees=stenosis_degrees,
+            )
+        )
+
+    return results
 
 
 def _load_original_image(image_path: Path, config: PipelineConfig) -> np.ndarray:
@@ -218,6 +244,22 @@ def _load_original_image(image_path: Path, config: PipelineConfig) -> np.ndarray
         raise ValueError(f"Unsupported original image shape: {image.shape}")
 
     return _resize_image(image, config.resize_width, config.resize_height)
+
+
+def _validate_variant_configs(configs: list[PipelineConfig]) -> None:
+    base_config = asdict(configs[0])
+    base_config.pop("stenosis_threshold")
+    base_config.pop("average_radius_threshold")
+
+    for config in configs[1:]:
+        compare_config = asdict(config)
+        compare_config.pop("stenosis_threshold")
+        compare_config.pop("average_radius_threshold")
+        if compare_config != base_config:
+            raise ValueError(
+                "Stenosis detection variants may only differ by stenosis_threshold "
+                "and average_radius_threshold."
+            )
 
 
 def _load_mask_image(mask_path: Path, config: PipelineConfig) -> tuple[np.ndarray, np.ndarray]:
@@ -601,11 +643,10 @@ def _average_path_radius(
     return average_radius / float(shortest_path_length)
 
 
-def _detect_stenosis_from_queue(
+def _detect_stenosis_candidates_from_queue(
     queue_rc: np.ndarray,
     average_radius: float,
     point_data: dict[tuple[int, int], float],
-    config: PipelineConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     if len(queue_rc) < 3:
         return np.zeros((0, 2), dtype=np.int32), np.zeros((0,), dtype=np.float64)
@@ -626,7 +667,7 @@ def _detect_stenosis_from_queue(
 
         stenosis_degree = 1.0 - stenosis_ratio
 
-        if stenosis_degree > config.stenosis_threshold and average_radius > config.average_radius_threshold:
+        if not np.isnan(average_radius):
             middle_points.append((int(queue_rc[index, 0]), int(queue_rc[index, 1])))
             stenosis_degrees.append(float(stenosis_degree))
 
@@ -634,6 +675,28 @@ def _detect_stenosis_from_queue(
         return np.zeros((0, 2), dtype=np.int32), np.zeros((0,), dtype=np.float64)
 
     return np.asarray(middle_points, dtype=np.int32), np.asarray(stenosis_degrees, dtype=np.float64)
+
+
+def _filter_stenosis_candidates(
+    raw_stenosis_points_rc: list[tuple[int, int]],
+    raw_stenosis_degrees: list[float],
+    raw_average_radii: list[float],
+    config: PipelineConfig,
+) -> tuple[list[tuple[int, int]], list[float]]:
+    stenosis_points_rc: list[tuple[int, int]] = []
+    stenosis_degrees: list[float] = []
+
+    for point_rc, degree, average_radius in zip(
+        raw_stenosis_points_rc,
+        raw_stenosis_degrees,
+        raw_average_radii,
+        strict=False,
+    ):
+        if degree > config.stenosis_threshold and average_radius > config.average_radius_threshold:
+            stenosis_points_rc.append(point_rc)
+            stenosis_degrees.append(degree)
+
+    return stenosis_points_rc, stenosis_degrees
 
 
 def _finalize_stenosis_points(

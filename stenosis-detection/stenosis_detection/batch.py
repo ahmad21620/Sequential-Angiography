@@ -7,7 +7,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .pipeline import PipelineConfig, run_stenosis_detection
+from .pipeline import PipelineConfig, run_stenosis_detection, run_stenosis_detection_variants
 from .visualization import build_output_paths, save_detection_outputs
 
 try:
@@ -79,9 +79,10 @@ class BatchProcessSummary:
     skipped_existing: int
     failed: int
     failures: list[BatchFailure]
+    threshold_variants: list[str] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "images_root": str(self.images_root),
             "masks_root": str(self.masks_root),
             "output_root": str(self.output_root),
@@ -92,6 +93,9 @@ class BatchProcessSummary:
             "failed": self.failed,
             "failures": [asdict(failure) for failure in self.failures],
         }
+        if self.threshold_variants is not None:
+            payload["threshold_variants"] = list(self.threshold_variants)
+        return payload
 
 
 def discover_tree_jobs(images_root: str | Path, masks_root: str | Path) -> list[TreeProcessingJob]:
@@ -149,6 +153,7 @@ def process_tree(
     config: PipelineConfig | None = None,
     skip_existing: bool = True,
     workers: int = 1,
+    threshold_variants: list[tuple[str, PipelineConfig]] | None = None,
 ) -> BatchProcessSummary:
     pipeline_config = config or PipelineConfig()
     worker_count = _resolve_worker_count(workers)
@@ -156,7 +161,7 @@ def process_tree(
     resolved_output_root.mkdir(parents=True, exist_ok=True)
 
     processed = 0
-    pending_jobs = _filter_pending_jobs(jobs, resolved_output_root, skip_existing)
+    pending_jobs = _filter_pending_jobs(jobs, resolved_output_root, skip_existing, threshold_variants)
     skipped_existing = len(jobs) - len(pending_jobs)
     failures: list[BatchFailure] = []
 
@@ -167,7 +172,7 @@ def process_tree(
 
         if worker_count == 1:
             for job in pending_jobs:
-                failure = _process_tree_job(job, resolved_output_root, pipeline_config)
+                failure = _process_tree_job(job, resolved_output_root, pipeline_config, threshold_variants)
                 if failure is None:
                     processed += 1
                 else:
@@ -180,7 +185,13 @@ def process_tree(
             future_to_job = {}
             with ProcessPoolExecutor(max_workers=worker_count, initializer=_prepare_worker_process) as executor:
                 for job in pending_jobs:
-                    future = executor.submit(_process_tree_job, job, resolved_output_root, pipeline_config)
+                    future = executor.submit(
+                        _process_tree_job,
+                        job,
+                        resolved_output_root,
+                        pipeline_config,
+                        threshold_variants,
+                    )
                     future_to_job[future] = job
 
                 for future in as_completed(future_to_job):
@@ -213,6 +224,7 @@ def process_tree(
         skipped_existing=skipped_existing,
         failed=len(failures),
         failures=failures,
+        threshold_variants=None if threshold_variants is None else [name for name, _ in threshold_variants],
     )
 
     (resolved_output_root / "batch_summary.json").write_text(
@@ -265,17 +277,37 @@ def _resolve_worker_count(workers: int) -> int:
     return workers
 
 
-def _filter_pending_jobs(jobs: list[TreeProcessingJob], output_root: Path, skip_existing: bool) -> list[TreeProcessingJob]:
+def _filter_pending_jobs(
+    jobs: list[TreeProcessingJob],
+    output_root: Path,
+    skip_existing: bool,
+    threshold_variants: list[tuple[str, PipelineConfig]] | None,
+) -> list[TreeProcessingJob]:
     if not skip_existing:
         return jobs
 
     pending_jobs: list[TreeProcessingJob] = []
     for job in jobs:
-        output_dir = output_root / job.relative_dir
-        expected_outputs = build_output_paths(output_dir, file_prefix=job.image_stem)
-        if not all(path.exists() for path in expected_outputs.values()):
+        expected_outputs = _build_expected_job_outputs(job, output_root, threshold_variants)
+        if not all(path.exists() for path in expected_outputs):
             pending_jobs.append(job)
     return pending_jobs
+
+
+def _build_expected_job_outputs(
+    job: TreeProcessingJob,
+    output_root: Path,
+    threshold_variants: list[tuple[str, PipelineConfig]] | None,
+) -> list[Path]:
+    if threshold_variants is None:
+        output_dir = output_root / job.relative_dir
+        return list(build_output_paths(output_dir, file_prefix=job.image_stem).values())
+
+    expected_outputs: list[Path] = []
+    for variant_name, _ in threshold_variants:
+        output_dir = output_root / variant_name / job.relative_dir
+        expected_outputs.extend(build_output_paths(output_dir, file_prefix=job.image_stem).values())
+    return expected_outputs
 
 
 def _prepare_worker_process() -> None:
@@ -287,11 +319,23 @@ def _prepare_worker_process() -> None:
         pass
 
 
-def _process_tree_job(job: TreeProcessingJob, output_root: Path, config: PipelineConfig) -> BatchFailure | None:
+def _process_tree_job(
+    job: TreeProcessingJob,
+    output_root: Path,
+    config: PipelineConfig,
+    threshold_variants: list[tuple[str, PipelineConfig]] | None = None,
+) -> BatchFailure | None:
     try:
-        output_dir = output_root / job.relative_dir
-        result = run_stenosis_detection(job.image_path, job.mask_path, config=config)
-        save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
+        if threshold_variants is None:
+            output_dir = output_root / job.relative_dir
+            result = run_stenosis_detection(job.image_path, job.mask_path, config=config)
+            save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
+        else:
+            variant_configs = [variant_config for _, variant_config in threshold_variants]
+            results = run_stenosis_detection_variants(job.image_path, job.mask_path, variant_configs)
+            for (variant_name, _), result in zip(threshold_variants, results, strict=True):
+                output_dir = output_root / variant_name / job.relative_dir
+                save_detection_outputs(result, output_dir, file_prefix=job.image_stem, show=False)
     except Exception as exc:  # pragma: no cover - depends on input data.
         return BatchFailure(
             image_path=str(job.image_path),

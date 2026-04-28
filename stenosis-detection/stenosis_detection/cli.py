@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from .batch import discover_tree_jobs, process_tree
-from .pipeline import PipelineConfig, run_stenosis_detection
+from .pipeline import PipelineConfig, run_stenosis_detection, run_stenosis_detection_variants
 from .visualization import save_detection_outputs
 
 
@@ -74,7 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--segmentation-distance-threshold", type=float, default=defaults.segmentation_distance_threshold, help="Distance threshold for filtering nearby segmentation points.")
     parser.add_argument("--stenosis-threshold", type=float, default=defaults.stenosis_threshold, help="Threshold used for stenosis degree filtering.")
+    parser.add_argument("--stenosis-thresholds", help="Comma-separated stenosis thresholds to evaluate in one shared run, e.g. 0.20,0.25,0.30.")
     parser.add_argument("--average-radius-threshold", type=float, default=defaults.average_radius_threshold, help="Average path radius threshold used for stenosis filtering.")
+    parser.add_argument("--average-radius-thresholds", help="Comma-separated average-radius thresholds to evaluate in one shared run, e.g. 3.0,4.0,5.0.")
     parser.add_argument("--final-point-distance-threshold", type=float, default=defaults.final_point_distance_threshold, help="Distance threshold used during final stenosis point filtering.")
     parser.add_argument("--branch-point-exclusion-distance", type=float, default=defaults.branch_point_exclusion_distance, help="Drop stenosis candidates within this distance of detected branch points. Use 0 to disable.")
     return parser
@@ -87,6 +90,10 @@ def main() -> int:
         parser.error("--workers must be 0 or greater.")
 
     config = _build_pipeline_config(args)
+    try:
+        threshold_variants = _build_threshold_variants(args, config)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     single_mode = args.image or args.mask or args.output_dir
     batch_mode = args.images_root or args.masks_root or args.output_root
@@ -98,17 +105,34 @@ def main() -> int:
 
     if single_mode:
         _validate_single_mode(parser, args)
-        result = run_stenosis_detection(
-            image_path=Path(args.image),
-            mask_path=Path(args.mask),
-            config=config,
-        )
-        output_files = save_detection_outputs(result, Path(args.output_dir), show=args.show)
+        if threshold_variants is None:
+            result = run_stenosis_detection(
+                image_path=Path(args.image),
+                mask_path=Path(args.mask),
+                config=config,
+            )
+            output_files = save_detection_outputs(result, Path(args.output_dir), show=args.show)
 
-        print("Stenosis detection completed.")
-        print(f"Detected stenosis points: {len(result.stenosis_points_xy)}")
-        for name, path in output_files.items():
-            print(f"{name}: {path}")
+            print("Stenosis detection completed.")
+            print(f"Detected stenosis points: {len(result.stenosis_points_xy)}")
+            for name, path in output_files.items():
+                print(f"{name}: {path}")
+        else:
+            results = run_stenosis_detection_variants(
+                image_path=Path(args.image),
+                mask_path=Path(args.mask),
+                configs=[variant_config for _, variant_config in threshold_variants],
+            )
+            print("Stenosis detection completed.")
+            for (variant_name, _), result in zip(threshold_variants, results, strict=True):
+                output_files = save_detection_outputs(
+                    result,
+                    Path(args.output_dir) / variant_name,
+                    show=args.show,
+                )
+                print(f"{variant_name}: {len(result.stenosis_points_xy)} stenosis points")
+                for name, path in output_files.items():
+                    print(f"{name}: {path}")
         return 0
 
     _validate_batch_mode(parser, args)
@@ -121,11 +145,14 @@ def main() -> int:
         config=config,
         skip_existing=not args.overwrite,
         workers=args.workers,
+        threshold_variants=threshold_variants,
     )
 
     print("Batch stenosis detection completed.")
     print(f"Total slices discovered: {summary.total_jobs}")
     print(f"Workers: {summary.workers}")
+    if threshold_variants is not None:
+        print(f"Threshold variants: {len(threshold_variants)}")
     print(f"Processed: {summary.processed}")
     print(f"Skipped existing: {summary.skipped_existing}")
     print(f"Failed: {summary.failed}")
@@ -165,3 +192,59 @@ def _build_pipeline_config(args: argparse.Namespace) -> PipelineConfig:
         final_point_distance_threshold=args.final_point_distance_threshold,
         branch_point_exclusion_distance=args.branch_point_exclusion_distance,
     )
+
+
+def _build_threshold_variants(
+    args: argparse.Namespace,
+    config: PipelineConfig,
+) -> list[tuple[str, PipelineConfig]] | None:
+    if args.stenosis_thresholds is None and args.average_radius_thresholds is None:
+        return None
+
+    stenosis_thresholds = _parse_float_list(args.stenosis_thresholds, "--stenosis-thresholds")
+    average_radius_thresholds = _parse_float_list(args.average_radius_thresholds, "--average-radius-thresholds")
+    if not stenosis_thresholds:
+        stenosis_thresholds = [config.stenosis_threshold]
+    if not average_radius_thresholds:
+        average_radius_thresholds = [config.average_radius_threshold]
+
+    variants: list[tuple[str, PipelineConfig]] = []
+    for stenosis_threshold in stenosis_thresholds:
+        for average_radius_threshold in average_radius_thresholds:
+            variant_name = _threshold_variant_name(stenosis_threshold, average_radius_threshold)
+            variant_config = replace(
+                config,
+                stenosis_threshold=stenosis_threshold,
+                average_radius_threshold=average_radius_threshold,
+            )
+            variants.append((variant_name, variant_config))
+    return variants
+
+
+def _parse_float_list(raw_value: str | None, option_name: str) -> list[float]:
+    if raw_value is None:
+        return []
+
+    values: list[float] = []
+    for item in raw_value.split(","):
+        clean_item = item.strip()
+        if not clean_item:
+            continue
+        try:
+            values.append(float(clean_item))
+        except ValueError as exc:
+            raise ValueError(f"{option_name} must contain comma-separated numbers.") from exc
+    if not values:
+        raise ValueError(f"{option_name} must contain at least one number.")
+    return values
+
+
+def _threshold_variant_name(stenosis_threshold: float, average_radius_threshold: float) -> str:
+    return (
+        f"stenosis_threshold_{_format_threshold_value(stenosis_threshold)}"
+        f"__average_radius_threshold_{_format_threshold_value(average_radius_threshold)}"
+    )
+
+
+def _format_threshold_value(value: float) -> str:
+    return f"{value:g}".replace("-", "minus_").replace(".", "p")

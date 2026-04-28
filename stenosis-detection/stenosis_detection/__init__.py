@@ -37,7 +37,7 @@ from .multiview import (
     score_lesion_candidate,
     select_final_case_lesion,
 )
-from .pipeline import PipelineConfig, StenosisDetectionResult, StenosisRecord, run_stenosis_detection
+from .pipeline import PipelineConfig, StenosisDetectionResult, StenosisRecord, run_stenosis_detection, run_stenosis_detection_variants
 from .temporal import (
     DEFAULT_VIEW_FRAME_COUNT,
     DEFAULT_MIN_PERSISTENCE_RATIO,
@@ -140,6 +140,7 @@ __all__ = [
     "register_frame_to_reference",
     "run_multiview_fusion",
     "run_stenosis_detection",
+    "run_stenosis_detection_variants",
     "run_temporal_fusion",
     "run_temporal_fusion_on_view_sequence",
     "save_detection_outputs",
