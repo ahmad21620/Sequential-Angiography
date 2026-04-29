@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
@@ -59,6 +61,13 @@ except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
 
         def __exit__(self, exc_type, exc, tb):
             self.close()
+
+
+@dataclass(frozen=True, slots=True)
+class FrameCountSkip:
+    view_id: str
+    frame_count: int
+    expected_frame_count: int
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,6 +138,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip a view only when the full expected output set for this run already exists and is non-empty.",
     )
+    parser.add_argument(
+        "--skip-frame-count-mismatches",
+        action="store_true",
+        help=(
+            "Skip views whose frame-result count does not match --expected-frame-count, "
+            "then print a tally at the end instead of failing the whole run."
+        ),
+    )
     return parser
 
 
@@ -148,11 +165,28 @@ def main() -> int:
     try:
         result_source = _resolve_result_source(args)
         if args.view_id is not None:
-            view_sequence = load_view_sequence(
-                result_source,
-                expected_frame_count=args.expected_frame_count,
-                view_id=args.view_id,
-            )
+            frame_count_skips: list[FrameCountSkip] = []
+            if args.skip_frame_count_mismatches:
+                view_sequence = load_view_sequence(
+                    result_source,
+                    expected_frame_count=None,
+                    view_id=args.view_id,
+                )
+                view_sequences, frame_count_skips = _filter_view_sequences_by_expected_frame_count(
+                    [view_sequence],
+                    expected_frame_count=args.expected_frame_count,
+                )
+                if not view_sequences:
+                    print("Processed 0 views.")
+                    _print_frame_count_skip_summary(frame_count_skips)
+                    return 0
+                view_sequence = view_sequences[0]
+            else:
+                view_sequence = load_view_sequence(
+                    result_source,
+                    expected_frame_count=args.expected_frame_count,
+                    view_id=args.view_id,
+                )
             output_path = _resolve_single_output_path(args, view_sequence, result_source=result_source)
             if args.skip_existing and _is_view_fully_processed(
                 output_path,
@@ -160,6 +194,8 @@ def main() -> int:
                 video_format=args.video_format,
             ):
                 print(f"Skipped view '{view_sequence.view_id}' because all expected outputs already exist: {output_path}")
+                if args.skip_frame_count_mismatches:
+                    _print_frame_count_skip_summary(frame_count_skips)
                 return 0
             _run_single_view(
                 view_sequence,
@@ -170,13 +206,35 @@ def main() -> int:
                 video_fps=args.video_fps,
                 video_format=args.video_format,
             )
+            if args.skip_frame_count_mismatches:
+                _print_frame_count_skip_summary(frame_count_skips)
             return 0
 
-        view_sequences = load_view_sequences(
-            result_source,
-            expected_frame_count=args.expected_frame_count,
-        )
-        if len(view_sequences) == 1:
+        frame_count_skips = []
+        if args.skip_frame_count_mismatches:
+            discovered_view_sequences = load_view_sequences(
+                result_source,
+                expected_frame_count=None,
+            )
+            view_sequences, frame_count_skips = _filter_view_sequences_by_expected_frame_count(
+                discovered_view_sequences,
+                expected_frame_count=args.expected_frame_count,
+            )
+        else:
+            view_sequences = load_view_sequences(
+                result_source,
+                expected_frame_count=args.expected_frame_count,
+            )
+
+        if not view_sequences:
+            print("Processed 0 views.")
+            if args.skip_existing:
+                print("Skipped 0 views with complete existing outputs.")
+            if args.skip_frame_count_mismatches:
+                _print_frame_count_skip_summary(frame_count_skips)
+            return 0
+
+        if len(view_sequences) == 1 and not frame_count_skips:
             only_view = view_sequences[0]
             output_path = _resolve_single_output_path(args, only_view, result_source=result_source)
             if args.skip_existing and _is_view_fully_processed(
@@ -195,6 +253,8 @@ def main() -> int:
                 video_fps=args.video_fps,
                 video_format=args.video_format,
             )
+            if args.skip_frame_count_mismatches:
+                _print_frame_count_skip_summary(frame_count_skips)
             return 0
 
         if args.output is not None:
@@ -215,7 +275,11 @@ def main() -> int:
                         f"Skipped view '{view_sequence.view_id}' because all expected outputs already exist: {output_path}"
                     )
                     progress.update(1)
-                    progress.set_postfix(processed=processed, skipped=skipped)
+                    progress.set_postfix(
+                        processed=processed,
+                        skipped=skipped,
+                        frame_count_skipped=len(frame_count_skips),
+                    )
                     continue
 
                 _run_single_view(
@@ -230,11 +294,17 @@ def main() -> int:
                 )
                 processed += 1
                 progress.update(1)
-                progress.set_postfix(processed=processed, skipped=skipped)
+                progress.set_postfix(
+                    processed=processed,
+                    skipped=skipped,
+                    frame_count_skipped=len(frame_count_skips),
+                )
 
         print(f"Processed {processed} views.")
         if args.skip_existing:
             print(f"Skipped {skipped} views with complete existing outputs.")
+        if args.skip_frame_count_mismatches:
+            _print_frame_count_skip_summary(frame_count_skips)
         return 0
     except (FileNotFoundError, NotADirectoryError, TemporalLoadError, ValueError) as exc:
         print(f"Temporal fusion failed: {exc}", file=sys.stderr)
@@ -246,6 +316,53 @@ def _resolve_result_source(args: argparse.Namespace) -> str | list[str]:
         return args.results_root
 
     return list(args.frame_results)
+
+
+def _filter_view_sequences_by_expected_frame_count(
+    view_sequences: list[ViewSequence],
+    *,
+    expected_frame_count: int,
+) -> tuple[list[ViewSequence], list[FrameCountSkip]]:
+    accepted_sequences: list[ViewSequence] = []
+    skipped_views: list[FrameCountSkip] = []
+
+    for view_sequence in view_sequences:
+        if view_sequence.frame_count == expected_frame_count:
+            accepted_sequences.append(view_sequence)
+            continue
+
+        skipped_views.append(
+            FrameCountSkip(
+                view_id=view_sequence.view_id,
+                frame_count=view_sequence.frame_count,
+                expected_frame_count=expected_frame_count,
+            )
+        )
+
+    return accepted_sequences, skipped_views
+
+
+def _print_frame_count_skip_summary(skipped_views: list[FrameCountSkip], *, log=print) -> None:
+    if not skipped_views:
+        log("Skipped 0 views with frame-count mismatches.")
+        return
+
+    expected_counts = sorted({skipped_view.expected_frame_count for skipped_view in skipped_views})
+    expected_summary = ", ".join(str(expected_count) for expected_count in expected_counts)
+    log(
+        f"Skipped {len(skipped_views)} {_pluralize('view', len(skipped_views))} "
+        f"with frame-count mismatches (expected {expected_summary} frame results)."
+    )
+
+    frame_count_tally = Counter(skipped_view.frame_count for skipped_view in skipped_views)
+    for frame_count, view_count in sorted(frame_count_tally.items()):
+        log(f"  {frame_count} frame results: {view_count} {_pluralize('view', view_count)}")
+
+
+def _pluralize(word: str, count: int) -> str:
+    if count == 1:
+        return word
+    return f"{word}s"
 
 
 def _resolve_single_output_path(

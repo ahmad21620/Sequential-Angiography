@@ -116,7 +116,7 @@ def load_view_sequences(
 def load_view_sequence(
     result_source: str | Path | Sequence[str | Path],
     *,
-    expected_frame_count: int = DEFAULT_VIEW_FRAME_COUNT,
+    expected_frame_count: int | None = DEFAULT_VIEW_FRAME_COUNT,
     view_id: str | None = None,
 ) -> ViewSequence:
     if view_id is not None:

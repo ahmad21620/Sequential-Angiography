@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import sys
 
@@ -276,6 +279,69 @@ class TemporalFusionTests(unittest.TestCase):
                     video_format="mp4",
                 )
             )
+
+    def test_cli_filters_and_tallies_frame_count_mismatches(self) -> None:
+        valid_view = self._make_view_sequence(view_id="study/series_a")
+        short_view = self._make_view_sequence(view_id="study/series_b")
+        short_view.frames = short_view.frames[:1]
+
+        accepted, skipped = temporal_cli._filter_view_sequences_by_expected_frame_count(
+            [valid_view, short_view],
+            expected_frame_count=2,
+        )
+
+        self.assertEqual([view.view_id for view in accepted], ["study/series_a"])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0].view_id, "study/series_b")
+        self.assertEqual(skipped[0].frame_count, 1)
+        self.assertEqual(skipped[0].expected_frame_count, 2)
+
+        messages: list[str] = []
+        temporal_cli._print_frame_count_skip_summary(skipped, log=messages.append)
+
+        self.assertEqual(
+            messages,
+            [
+                "Skipped 1 view with frame-count mismatches (expected 2 frame results).",
+                "  1 frame results: 1 view",
+            ],
+        )
+
+    def test_cli_skip_frame_count_mismatches_processes_valid_views_and_reports_tally(self) -> None:
+        valid_view = self._make_view_sequence(view_id="study/series_a")
+        short_view = self._make_view_sequence(view_id="study/series_b")
+        short_view.frames = short_view.frames[:1]
+        processed_view_ids: list[str] = []
+
+        def fake_run_single_view(view_sequence, **kwargs):
+            processed_view_ids.append(view_sequence.view_id)
+            return None
+
+        argv = [
+            "run_temporal_fusion.py",
+            "--results-root",
+            "InputResults",
+            "--output-root",
+            "OutputTemporal",
+            "--expected-frame-count",
+            "2",
+            "--skip-frame-count-mismatches",
+        ]
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(temporal_cli, "load_view_sequences", return_value=[valid_view, short_view]),
+            patch.object(temporal_cli, "_run_single_view", side_effect=fake_run_single_view),
+            redirect_stdout(stdout),
+        ):
+            exit_code = temporal_cli.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(processed_view_ids, ["study/series_a"])
+        output = stdout.getvalue()
+        self.assertIn("Processed 1 views.", output)
+        self.assertIn("Skipped 1 view with frame-count mismatches (expected 2 frame results).", output)
+        self.assertIn("  1 frame results: 1 view", output)
 
     def _make_frame_result(
         self,
