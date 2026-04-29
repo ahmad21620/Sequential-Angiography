@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import sys
 from pathlib import Path
@@ -68,6 +69,23 @@ class FrameCountSkip:
     view_id: str
     frame_count: int
     expected_frame_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ViewFusionJob:
+    view_sequence: ViewSequence
+    output_path: Path
+    min_supporting_frames: int
+    min_persistence_ratio: float
+    write_video: bool
+    video_fps: float
+    video_format: str
+
+
+@dataclass(slots=True)
+class ViewFusionJobResult:
+    view_id: str
+    messages: list[str]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -146,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
             "then print a tally at the end instead of failing the whole run."
         ),
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of views to process in parallel for batch temporal fusion. Default: 1.",
+    )
     return parser
 
 
@@ -161,6 +185,8 @@ def main() -> int:
         parser.error("--min-persistence-ratio must be in the range (0.0, 1.0].")
     if args.video_fps <= 0.0:
         parser.error("--video-fps must be positive.")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1.")
 
     try:
         result_source = _resolve_result_source(args)
@@ -260,45 +286,19 @@ def main() -> int:
         if args.output is not None:
             parser.error("--output can only be used when exactly one view is selected. Use --output-root for batch temporal fusion.")
 
-        processed = 0
-        skipped = 0
-        with tqdm(total=len(view_sequences), desc="Processing views", unit="view", dynamic_ncols=True) as progress:
-            for view_sequence in view_sequences:
-                output_path = _build_view_output_path(args.output_root, view_sequence, result_source=result_source)
-                if args.skip_existing and _is_view_fully_processed(
-                    output_path,
-                    write_video=args.write_video,
-                    video_format=args.video_format,
-                ):
-                    skipped += 1
-                    progress.write(
-                        f"Skipped view '{view_sequence.view_id}' because all expected outputs already exist: {output_path}"
-                    )
-                    progress.update(1)
-                    progress.set_postfix(
-                        processed=processed,
-                        skipped=skipped,
-                        frame_count_skipped=len(frame_count_skips),
-                    )
-                    continue
-
-                _run_single_view(
-                    view_sequence,
-                    output_path=output_path,
-                    min_supporting_frames=args.min_supporting_frames,
-                    min_persistence_ratio=args.min_persistence_ratio,
-                    write_video=args.write_video,
-                    video_fps=args.video_fps,
-                    video_format=args.video_format,
-                    log=progress.write,
-                )
-                processed += 1
-                progress.update(1)
-                progress.set_postfix(
-                    processed=processed,
-                    skipped=skipped,
-                    frame_count_skipped=len(frame_count_skips),
-                )
+        processed, skipped = _run_batch_views(
+            view_sequences,
+            output_root=args.output_root,
+            result_source=result_source,
+            min_supporting_frames=args.min_supporting_frames,
+            min_persistence_ratio=args.min_persistence_ratio,
+            write_video=args.write_video,
+            video_fps=args.video_fps,
+            video_format=args.video_format,
+            skip_existing=args.skip_existing,
+            workers=args.workers,
+            frame_count_skip_count=len(frame_count_skips),
+        )
 
         print(f"Processed {processed} views.")
         if args.skip_existing:
@@ -437,6 +437,124 @@ def _is_view_fully_processed(
         if path.stat().st_size <= 0:
             return False
     return True
+
+
+def _run_batch_views(
+    view_sequences: list[ViewSequence],
+    *,
+    output_root: str | Path,
+    result_source: str | list[str],
+    min_supporting_frames: int,
+    min_persistence_ratio: float,
+    write_video: bool,
+    video_fps: float,
+    video_format: str,
+    skip_existing: bool,
+    workers: int,
+    frame_count_skip_count: int,
+) -> tuple[int, int]:
+    processed = 0
+    skipped = 0
+    jobs: list[ViewFusionJob] = []
+
+    with tqdm(total=len(view_sequences), desc="Processing views", unit="view", dynamic_ncols=True) as progress:
+        for view_sequence in view_sequences:
+            output_path = _build_view_output_path(output_root, view_sequence, result_source=result_source)
+            if skip_existing and _is_view_fully_processed(
+                output_path,
+                write_video=write_video,
+                video_format=video_format,
+            ):
+                skipped += 1
+                progress.write(
+                    f"Skipped view '{view_sequence.view_id}' because all expected outputs already exist: {output_path}"
+                )
+                progress.update(1)
+                _set_progress_postfix(
+                    progress,
+                    processed=processed,
+                    skipped=skipped,
+                    frame_count_skip_count=frame_count_skip_count,
+                )
+                continue
+
+            jobs.append(
+                ViewFusionJob(
+                    view_sequence=view_sequence,
+                    output_path=output_path,
+                    min_supporting_frames=min_supporting_frames,
+                    min_persistence_ratio=min_persistence_ratio,
+                    write_video=write_video,
+                    video_fps=video_fps,
+                    video_format=video_format,
+                )
+            )
+
+        if workers == 1 or len(jobs) <= 1:
+            for job in jobs:
+                job_result = _run_single_view_job(job)
+                _write_job_messages(job_result, log=progress.write)
+                processed += 1
+                progress.update(1)
+                _set_progress_postfix(
+                    progress,
+                    processed=processed,
+                    skipped=skipped,
+                    frame_count_skip_count=frame_count_skip_count,
+                )
+            return processed, skipped
+
+        active_workers = min(workers, len(jobs))
+        progress.write(f"Running temporal fusion with {active_workers} workers.")
+        with ProcessPoolExecutor(max_workers=active_workers) as executor:
+            futures = [executor.submit(_run_single_view_job, job) for job in jobs]
+            for future in as_completed(futures):
+                job_result = future.result()
+                _write_job_messages(job_result, log=progress.write)
+                processed += 1
+                progress.update(1)
+                _set_progress_postfix(
+                    progress,
+                    processed=processed,
+                    skipped=skipped,
+                    frame_count_skip_count=frame_count_skip_count,
+                )
+
+    return processed, skipped
+
+
+def _run_single_view_job(job: ViewFusionJob) -> ViewFusionJobResult:
+    messages: list[str] = []
+    _run_single_view(
+        job.view_sequence,
+        output_path=job.output_path,
+        min_supporting_frames=job.min_supporting_frames,
+        min_persistence_ratio=job.min_persistence_ratio,
+        write_video=job.write_video,
+        video_fps=job.video_fps,
+        video_format=job.video_format,
+        log=messages.append,
+    )
+    return ViewFusionJobResult(view_id=job.view_sequence.view_id, messages=messages)
+
+
+def _write_job_messages(job_result: ViewFusionJobResult, *, log=print) -> None:
+    for message in job_result.messages:
+        log(message)
+
+
+def _set_progress_postfix(
+    progress,
+    *,
+    processed: int,
+    skipped: int,
+    frame_count_skip_count: int,
+) -> None:
+    progress.set_postfix(
+        processed=processed,
+        skipped=skipped,
+        frame_count_skipped=frame_count_skip_count,
+    )
 
 
 def _run_single_view(

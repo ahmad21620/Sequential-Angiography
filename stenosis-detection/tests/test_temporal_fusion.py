@@ -343,6 +343,36 @@ class TemporalFusionTests(unittest.TestCase):
         self.assertIn("Skipped 1 view with frame-count mismatches (expected 2 frame results).", output)
         self.assertIn("  1 frame results: 1 view", output)
 
+    def test_cli_passes_workers_to_batch_runner(self) -> None:
+        first_view = self._make_view_sequence(view_id="study/series_a")
+        second_view = self._make_view_sequence(view_id="study/series_b")
+        argv = [
+            "run_temporal_fusion.py",
+            "--results-root",
+            "InputResults",
+            "--output-root",
+            "OutputTemporal",
+            "--expected-frame-count",
+            "2",
+            "--workers",
+            "4",
+        ]
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(temporal_cli, "load_view_sequences", return_value=[first_view, second_view]),
+            patch.object(temporal_cli, "_run_batch_views", return_value=(2, 0)) as run_batch_views,
+            redirect_stdout(stdout),
+        ):
+            exit_code = temporal_cli.main()
+
+        self.assertEqual(exit_code, 0)
+        run_batch_views.assert_called_once()
+        _, kwargs = run_batch_views.call_args
+        self.assertEqual(kwargs["workers"], 4)
+        self.assertEqual(kwargs["skip_existing"], False)
+        self.assertIn("Processed 2 views.", stdout.getvalue())
+
     def _make_frame_result(
         self,
         *,
