@@ -16,7 +16,7 @@ from stenosis_detection.benchmarking import run_temporal_level_benchmark
 
 
 class TemporalBenchmarkingTests(unittest.TestCase):
-    def test_temporal_benchmark_writes_sequence_and_case_outputs(self) -> None:
+    def test_temporal_benchmark_writes_sequence_outputs_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             results_root = temp_root / "temporal_results"
@@ -79,8 +79,8 @@ class TemporalBenchmarkingTests(unittest.TestCase):
             self.assertTrue((output_root / "temporal_sequence_rows.jsonl").is_file())
             self.assertTrue((output_root / "temporal_sequence_summary.json").is_file())
             self.assertTrue((output_root / "temporal_sequence_summary.csv").is_file())
-            self.assertTrue((output_root / "case_from_temporal_rows.csv").is_file())
-            self.assertTrue((output_root / "case_from_temporal_summary.json").is_file())
+            self.assertFalse((output_root / "case_from_temporal_rows.csv").exists())
+            self.assertFalse((output_root / "case_from_temporal_summary.json").exists())
             self.assertTrue((output_root / "threshold_sweep_temporal.csv").is_file())
             self.assertTrue((output_root / "threshold_sweep_summary.json").is_file())
 
@@ -104,18 +104,6 @@ class TemporalBenchmarkingTests(unittest.TestCase):
             self.assertEqual(result.sequence_summary.false_negative, 1)
             self.assertEqual(result.sequence_summary.skipped_missing_label, 1)
             self.assertEqual(result.sequence_summary.labels_without_prediction, 1)
-
-            case_row = self._row_by_key(result.case_rows, "case_id", "case_001")
-            self.assertEqual(case_row["total_sequences"], 2)
-            self.assertEqual(case_row["positive_sequences"], 1)
-            self.assertAlmostEqual(case_row["positive_sequence_ratio"], 0.5)
-            self.assertAlmostEqual(case_row["max_temporal_score"], 0.65)
-            self.assertAlmostEqual(case_row["max_temporal_degree"], 0.82)
-            self.assertEqual(case_row["best_sequence_id"], "view_01")
-            self.assertTrue(case_row["predicted_positive_any_sequence"])
-            self.assertTrue(case_row["predicted_positive_ratio_threshold"])
-            self.assertEqual(case_row["weak_outcome_any_sequence"], "TP")
-            self.assertEqual(case_row["weak_outcome_ratio_threshold"], "TP")
 
             saved_sequence_rows = self._read_csv(output_root / "temporal_sequence_rows.csv")
             self.assertEqual(len(saved_sequence_rows), 4)
@@ -166,7 +154,6 @@ class TemporalBenchmarkingTests(unittest.TestCase):
 
             self.assertFalse(result.sequence_rows[0]["predicted_positive"])
             self.assertEqual(result.sequence_rows[0]["weak_outcome"], "FN")
-            self.assertEqual(result.case_rows[0]["positive_sequences"], 0)
 
     def _write_temporal_result(
         self,
@@ -201,12 +188,6 @@ class TemporalBenchmarkingTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-
-    def _row_by_key(self, rows: list[dict[str, object]], key: str, value: object) -> dict[str, object]:
-        for row in rows:
-            if row[key] == value:
-                return row
-        self.fail(f"Missing row with {key}={value!r}")
 
     def _read_csv(self, path: Path) -> list[dict[str, str]]:
         with path.open("r", encoding="utf-8", newline="") as handle:

@@ -75,8 +75,6 @@ Frame outputs include:
 - `frame_rows.jsonl`
 - `frame_summary.json`
 - `frame_summary.csv`
-- sequence rollups from frames
-- case rollups from frames
 
 Example:
 
@@ -113,8 +111,6 @@ Temporal outputs include:
 - `temporal_sequence_rows.jsonl`
 - `temporal_sequence_summary.json`
 - `temporal_sequence_summary.csv`
-- `case_from_temporal_rows.csv`
-- `case_from_temporal_summary.json`
 
 Example:
 

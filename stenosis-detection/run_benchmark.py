@@ -48,18 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum frame stenosis degree required to count a non-empty frame as positive.",
     )
     parser.add_argument(
-        "--sequence-positive-ratio-threshold",
-        type=float,
-        default=0.25,
-        help="Minimum positive-frame ratio required for sequence-level positive prediction.",
-    )
-    parser.add_argument(
-        "--case-positive-ratio-threshold",
-        type=float,
-        default=0.25,
-        help="Minimum positive frame/sequence ratio required for case-level positive prediction.",
-    )
-    parser.add_argument(
         "--temporal-min-degree",
         type=float,
         default=0.0,
@@ -107,10 +95,6 @@ def main() -> int:
 
     if args.frame_min_degree < 0.0:
         parser.error("--frame-min-degree must be >= 0.0.")
-    if not 0.0 <= args.sequence_positive_ratio_threshold <= 1.0:
-        parser.error("--sequence-positive-ratio-threshold must be in the range [0.0, 1.0].")
-    if not 0.0 <= args.case_positive_ratio_threshold <= 1.0:
-        parser.error("--case-positive-ratio-threshold must be in the range [0.0, 1.0].")
     if args.temporal_min_degree < 0.0:
         parser.error("--temporal-min-degree must be >= 0.0.")
     if not 0.0 <= args.temporal_min_persistence_ratio <= 1.0:
@@ -127,8 +111,6 @@ def main() -> int:
                 weak_labels_path=Path(args.weak_labels),
                 output_root=Path(args.output_root),
                 frame_min_degree=args.frame_min_degree,
-                sequence_positive_ratio_threshold=args.sequence_positive_ratio_threshold,
-                case_positive_ratio_threshold=args.case_positive_ratio_threshold,
                 include_unclear_labels=args.include_unclear_labels,
                 write_threshold_sweep_report=args.write_threshold_sweep,
             )
@@ -141,7 +123,6 @@ def main() -> int:
                 output_root=Path(args.output_root),
                 temporal_min_degree=args.temporal_min_degree,
                 temporal_min_persistence_ratio=args.temporal_min_persistence_ratio,
-                case_positive_ratio_threshold=args.case_positive_ratio_threshold,
                 include_unclear_labels=args.include_unclear_labels,
                 write_threshold_sweep_report=args.write_threshold_sweep,
             )
@@ -170,8 +151,6 @@ def main() -> int:
 
 def _print_frame_summary(result: FrameBenchmarkResult) -> None:
     print(f"Frame rows: {len(result.frame_rows)}")
-    print(f"Sequence rows: {len(result.sequence_rows)}")
-    print(f"Case rows: {len(result.case_rows)}")
     print(f"Frame total evaluated: {result.frame_summary.total_evaluated}")
     print(f"Frame accuracy: {_format_metric(result.frame_summary.accuracy)}")
     for label, path in result.output_paths.to_dict().items():
@@ -181,7 +160,6 @@ def _print_frame_summary(result: FrameBenchmarkResult) -> None:
 
 def _print_temporal_summary(result: TemporalBenchmarkResult) -> None:
     print(f"Temporal sequence rows: {len(result.sequence_rows)}")
-    print(f"Case rows: {len(result.case_rows)}")
     print(f"Temporal sequence total evaluated: {result.sequence_summary.total_evaluated}")
     print(f"Temporal sequence accuracy: {_format_metric(result.sequence_summary.accuracy)}")
     for label, path in result.output_paths.to_dict().items():

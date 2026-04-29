@@ -4,7 +4,6 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 from typing import Any, Iterable
 
 from .io import BenchmarkIOError
@@ -31,10 +30,6 @@ class FrameBenchmarkOutputs:
     frame_rows_jsonl: Path
     frame_summary_json: Path
     frame_summary_csv: Path
-    sequence_rows_csv: Path
-    sequence_summary_json: Path
-    case_rows_csv: Path
-    case_summary_json: Path
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -42,10 +37,6 @@ class FrameBenchmarkOutputs:
             "frame_rows_jsonl": str(self.frame_rows_jsonl),
             "frame_summary_json": str(self.frame_summary_json),
             "frame_summary_csv": str(self.frame_summary_csv),
-            "sequence_from_frame_rows_csv": str(self.sequence_rows_csv),
-            "sequence_from_frame_summary_json": str(self.sequence_summary_json),
-            "case_from_frame_rows_csv": str(self.case_rows_csv),
-            "case_from_frame_summary_json": str(self.case_summary_json),
         }
 
 
@@ -53,12 +44,6 @@ class FrameBenchmarkOutputs:
 class FrameBenchmarkResult:
     frame_rows: list[dict[str, Any]]
     frame_summary: BinaryMetricSummary
-    sequence_rows: list[dict[str, Any]]
-    sequence_any_frame_summary: BinaryMetricSummary
-    sequence_ratio_threshold_summary: BinaryMetricSummary
-    case_rows: list[dict[str, Any]]
-    case_any_frame_summary: BinaryMetricSummary
-    case_ratio_threshold_summary: BinaryMetricSummary
     output_paths: FrameBenchmarkOutputs
     threshold_sweep_paths: dict[str, Path]
 
@@ -69,8 +54,6 @@ def run_frame_level_benchmark(
     weak_labels_path: str | Path,
     output_root: str | Path,
     frame_min_degree: float = 0.0,
-    sequence_positive_ratio_threshold: float = 0.25,
-    case_positive_ratio_threshold: float = 0.25,
     include_unclear_labels: bool = False,
     write_threshold_sweep_report: bool = False,
 ) -> FrameBenchmarkResult:
@@ -80,8 +63,6 @@ def run_frame_level_benchmark(
     _validate_frame_benchmark_inputs(
         resolved_results_root,
         frame_min_degree=frame_min_degree,
-        sequence_positive_ratio_threshold=sequence_positive_ratio_threshold,
-        case_positive_ratio_threshold=case_positive_ratio_threshold,
     )
 
     weak_labels = load_weak_labels_jsonl(weak_labels_path)
@@ -104,61 +85,11 @@ def run_frame_level_benchmark(
         labels=weak_labels,
     )
 
-    sequence_rows = _build_sequence_rows(
-        frame_rows,
-        weak_labels=weak_labels,
-        ratio_threshold=sequence_positive_ratio_threshold,
-        include_unclear_labels=include_unclear_labels,
-    )
-    sequence_any_summary = _summarize_dict_rows(
-        sequence_rows,
-        prediction_column="predicted_positive_any_frame",
-        outcome_column="weak_outcome_any_frame",
-        skip_column="skip_reason_any_frame",
-        labels=weak_labels,
-    )
-    sequence_ratio_summary = _summarize_dict_rows(
-        sequence_rows,
-        prediction_column="predicted_positive_ratio_threshold",
-        outcome_column="weak_outcome_ratio_threshold",
-        skip_column="skip_reason_ratio_threshold",
-        labels=weak_labels,
-    )
-
-    case_rows = _build_case_rows(
-        frame_rows,
-        weak_labels=weak_labels,
-        ratio_threshold=case_positive_ratio_threshold,
-        include_unclear_labels=include_unclear_labels,
-    )
-    case_any_summary = _summarize_dict_rows(
-        case_rows,
-        prediction_column="predicted_positive_any_frame",
-        outcome_column="weak_outcome_any_frame",
-        skip_column="skip_reason_any_frame",
-        labels=weak_labels,
-    )
-    case_ratio_summary = _summarize_dict_rows(
-        case_rows,
-        prediction_column="predicted_positive_ratio_threshold",
-        outcome_column="weak_outcome_ratio_threshold",
-        skip_column="skip_reason_ratio_threshold",
-        labels=weak_labels,
-    )
-
     output_paths = save_frame_benchmark_outputs(
         output_root=resolved_output_root,
         frame_rows=frame_rows,
         frame_summary=frame_summary,
-        sequence_rows=sequence_rows,
-        sequence_any_frame_summary=sequence_any_summary,
-        sequence_ratio_threshold_summary=sequence_ratio_summary,
-        case_rows=case_rows,
-        case_any_frame_summary=case_any_summary,
-        case_ratio_threshold_summary=case_ratio_summary,
         frame_min_degree=frame_min_degree,
-        sequence_positive_ratio_threshold=sequence_positive_ratio_threshold,
-        case_positive_ratio_threshold=case_positive_ratio_threshold,
         include_unclear_labels=include_unclear_labels,
     )
     threshold_sweep_paths = (
@@ -175,12 +106,6 @@ def run_frame_level_benchmark(
     return FrameBenchmarkResult(
         frame_rows=frame_rows,
         frame_summary=frame_summary,
-        sequence_rows=sequence_rows,
-        sequence_any_frame_summary=sequence_any_summary,
-        sequence_ratio_threshold_summary=sequence_ratio_summary,
-        case_rows=case_rows,
-        case_any_frame_summary=case_any_summary,
-        case_ratio_threshold_summary=case_ratio_summary,
         output_paths=output_paths,
         threshold_sweep_paths=threshold_sweep_paths,
     )
@@ -208,15 +133,7 @@ def save_frame_benchmark_outputs(
     output_root: str | Path,
     frame_rows: list[dict[str, Any]],
     frame_summary: BinaryMetricSummary,
-    sequence_rows: list[dict[str, Any]],
-    sequence_any_frame_summary: BinaryMetricSummary,
-    sequence_ratio_threshold_summary: BinaryMetricSummary,
-    case_rows: list[dict[str, Any]],
-    case_any_frame_summary: BinaryMetricSummary,
-    case_ratio_threshold_summary: BinaryMetricSummary,
     frame_min_degree: float,
-    sequence_positive_ratio_threshold: float,
-    case_positive_ratio_threshold: float,
     include_unclear_labels: bool,
 ) -> FrameBenchmarkOutputs:
     resolved_output_root = Path(output_root)
@@ -226,10 +143,6 @@ def save_frame_benchmark_outputs(
     frame_rows_jsonl = resolved_output_root / "frame_rows.jsonl"
     frame_summary_json = resolved_output_root / "frame_summary.json"
     frame_summary_csv = resolved_output_root / "frame_summary.csv"
-    sequence_rows_csv = resolved_output_root / "sequence_from_frame_rows.csv"
-    sequence_summary_json = resolved_output_root / "sequence_from_frame_summary.json"
-    case_rows_csv = resolved_output_root / "case_from_frame_rows.csv"
-    case_summary_json = resolved_output_root / "case_from_frame_summary.json"
 
     _write_csv(frame_rows_csv, frame_rows, fieldnames=FRAME_ROW_FIELDS)
     _write_jsonl(frame_rows_jsonl, frame_rows)
@@ -255,39 +168,11 @@ def save_frame_benchmark_outputs(
         ],
     )
 
-    _write_csv(sequence_rows_csv, sequence_rows, fieldnames=SEQUENCE_ROW_FIELDS)
-    _write_json(
-        sequence_summary_json,
-        {
-            "level": "sequence_from_frame",
-            "sequence_positive_ratio_threshold": float(sequence_positive_ratio_threshold),
-            "include_unclear_labels": include_unclear_labels,
-            "any_frame": sequence_any_frame_summary.to_dict(),
-            "ratio_threshold": sequence_ratio_threshold_summary.to_dict(),
-        },
-    )
-
-    _write_csv(case_rows_csv, case_rows, fieldnames=CASE_ROW_FIELDS)
-    _write_json(
-        case_summary_json,
-        {
-            "level": "case_from_frame",
-            "case_positive_ratio_threshold": float(case_positive_ratio_threshold),
-            "include_unclear_labels": include_unclear_labels,
-            "any_frame": case_any_frame_summary.to_dict(),
-            "ratio_threshold": case_ratio_threshold_summary.to_dict(),
-        },
-    )
-
     return FrameBenchmarkOutputs(
         frame_rows_csv=frame_rows_csv,
         frame_rows_jsonl=frame_rows_jsonl,
         frame_summary_json=frame_summary_json,
         frame_summary_csv=frame_summary_csv,
-        sequence_rows_csv=sequence_rows_csv,
-        sequence_summary_json=sequence_summary_json,
-        case_rows_csv=case_rows_csv,
-        case_summary_json=case_summary_json,
     )
 
 
@@ -343,111 +228,6 @@ def _build_frame_row(
         "weak_outcome": weak_outcome,
         "skip_reason": skip_reason,
     }
-
-
-def _build_sequence_rows(
-    frame_rows: list[dict[str, Any]],
-    *,
-    weak_labels: dict[str, WeakLabel],
-    ratio_threshold: float,
-    include_unclear_labels: bool,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for (case_id, sequence_id), group_rows in sorted(_group_rows(frame_rows, keys=("case_id", "sequence_id")).items()):
-        total_frames = len(group_rows)
-        positive_frames = sum(1 for row in group_rows if row["predicted_positive"])
-        positive_degrees = [float(row["score"]) for row in group_rows if row["predicted_positive"]]
-        positive_frame_ratio = _safe_ratio(positive_frames, total_frames)
-        predicted_any = positive_frames > 0
-        predicted_ratio = positive_frame_ratio >= ratio_threshold
-        label = weak_labels.get(case_id)
-        any_outcome, any_skip_reason, label_target = _weak_outcome(
-            predicted_any,
-            label,
-            include_unclear_labels=include_unclear_labels,
-        )
-        ratio_outcome, ratio_skip_reason, _ = _weak_outcome(
-            predicted_ratio,
-            label,
-            include_unclear_labels=include_unclear_labels,
-        )
-
-        rows.append(
-            {
-                "case_id": case_id,
-                "sequence_id": sequence_id,
-                "total_frames": total_frames,
-                "positive_frames": positive_frames,
-                "negative_frames": total_frames - positive_frames,
-                "positive_frame_ratio": positive_frame_ratio,
-                "max_frame_degree": max((float(row["score"]) for row in group_rows), default=0.0),
-                "mean_positive_frame_degree": mean(positive_degrees) if positive_degrees else 0.0,
-                "predicted_positive_any_frame": predicted_any,
-                "predicted_positive_ratio_threshold": predicted_ratio,
-                "positive_ratio_threshold": float(ratio_threshold),
-                **_label_fields(label, label_target=label_target),
-                "weak_outcome_any_frame": any_outcome,
-                "skip_reason_any_frame": any_skip_reason,
-                "weak_outcome_ratio_threshold": ratio_outcome,
-                "skip_reason_ratio_threshold": ratio_skip_reason,
-            }
-        )
-    return rows
-
-
-def _build_case_rows(
-    frame_rows: list[dict[str, Any]],
-    *,
-    weak_labels: dict[str, WeakLabel],
-    ratio_threshold: float,
-    include_unclear_labels: bool,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for case_id, group_rows in sorted(_group_rows(frame_rows, keys=("case_id",)).items()):
-        total_frames = len(group_rows)
-        positive_frames = sum(1 for row in group_rows if row["predicted_positive"])
-        positive_frame_ratio = _safe_ratio(positive_frames, total_frames)
-        sequence_ids = {str(row["sequence_id"]) for row in group_rows}
-        positive_sequences = {
-            str(row["sequence_id"])
-            for row in group_rows
-            if row["predicted_positive"]
-        }
-        predicted_any = positive_frames > 0
-        predicted_ratio = positive_frame_ratio >= ratio_threshold
-        label = weak_labels.get(case_id)
-        any_outcome, any_skip_reason, label_target = _weak_outcome(
-            predicted_any,
-            label,
-            include_unclear_labels=include_unclear_labels,
-        )
-        ratio_outcome, ratio_skip_reason, _ = _weak_outcome(
-            predicted_ratio,
-            label,
-            include_unclear_labels=include_unclear_labels,
-        )
-
-        rows.append(
-            {
-                "case_id": case_id,
-                "total_frames": total_frames,
-                "positive_frames": positive_frames,
-                "negative_frames": total_frames - positive_frames,
-                "positive_frame_ratio": positive_frame_ratio,
-                "positive_sequences": len(positive_sequences),
-                "total_sequences": len(sequence_ids),
-                "max_frame_degree": max((float(row["score"]) for row in group_rows), default=0.0),
-                "predicted_positive_any_frame": predicted_any,
-                "predicted_positive_ratio_threshold": predicted_ratio,
-                "positive_ratio_threshold": float(ratio_threshold),
-                **_label_fields(label, label_target=label_target),
-                "weak_outcome_any_frame": any_outcome,
-                "skip_reason_any_frame": any_skip_reason,
-                "weak_outcome_ratio_threshold": ratio_outcome,
-                "skip_reason_ratio_threshold": ratio_skip_reason,
-            }
-        )
-    return rows
 
 
 def _summarize_dict_rows(
@@ -590,21 +370,6 @@ def _coerce_float(value: object) -> float | None:
         return None
 
 
-def _group_rows(rows: Iterable[dict[str, Any]], *, keys: tuple[str, ...]) -> dict[Any, list[dict[str, Any]]]:
-    grouped: dict[Any, list[dict[str, Any]]] = {}
-    for row in rows:
-        key_parts = tuple(row[key] for key in keys)
-        key: Any = key_parts[0] if len(key_parts) == 1 else key_parts
-        grouped.setdefault(key, []).append(row)
-    return grouped
-
-
-def _safe_ratio(numerator: int, denominator: int) -> float:
-    if denominator == 0:
-        return 0.0
-    return float(numerator / denominator)
-
-
 def _write_csv(path: Path, rows: list[dict[str, Any]], *, fieldnames: list[str] | None = None) -> None:
     resolved_fieldnames = fieldnames or _union_fieldnames(rows)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -641,15 +406,9 @@ def _validate_frame_benchmark_inputs(
     results_root: Path,
     *,
     frame_min_degree: float,
-    sequence_positive_ratio_threshold: float,
-    case_positive_ratio_threshold: float,
 ) -> None:
     if frame_min_degree < 0.0:
         raise ValueError("frame_min_degree must be >= 0.0.")
-    if not 0.0 <= sequence_positive_ratio_threshold <= 1.0:
-        raise ValueError("sequence_positive_ratio_threshold must be in the range [0.0, 1.0].")
-    if not 0.0 <= case_positive_ratio_threshold <= 1.0:
-        raise ValueError("case_positive_ratio_threshold must be in the range [0.0, 1.0].")
     if not results_root.exists():
         raise FileNotFoundError(f"Frame results root does not exist: {results_root}")
     if not results_root.is_dir():
@@ -684,58 +443,4 @@ FRAME_ROW_FIELDS = [
     "label_source_path",
     "weak_outcome",
     "skip_reason",
-]
-
-SEQUENCE_ROW_FIELDS = [
-    "case_id",
-    "sequence_id",
-    "total_frames",
-    "positive_frames",
-    "negative_frames",
-    "positive_frame_ratio",
-    "max_frame_degree",
-    "mean_positive_frame_degree",
-    "predicted_positive_any_frame",
-    "predicted_positive_ratio_threshold",
-    "positive_ratio_threshold",
-    "label_target",
-    "label_status",
-    "label_stenosis_exists",
-    "label_severity",
-    "label_confidence",
-    "label_excel_row",
-    "label_column_U",
-    "label_max_percent",
-    "label_source_path",
-    "weak_outcome_any_frame",
-    "skip_reason_any_frame",
-    "weak_outcome_ratio_threshold",
-    "skip_reason_ratio_threshold",
-]
-
-CASE_ROW_FIELDS = [
-    "case_id",
-    "total_frames",
-    "positive_frames",
-    "negative_frames",
-    "positive_frame_ratio",
-    "positive_sequences",
-    "total_sequences",
-    "max_frame_degree",
-    "predicted_positive_any_frame",
-    "predicted_positive_ratio_threshold",
-    "positive_ratio_threshold",
-    "label_target",
-    "label_status",
-    "label_stenosis_exists",
-    "label_severity",
-    "label_confidence",
-    "label_excel_row",
-    "label_column_U",
-    "label_max_percent",
-    "label_source_path",
-    "weak_outcome_any_frame",
-    "skip_reason_any_frame",
-    "weak_outcome_ratio_threshold",
-    "skip_reason_ratio_threshold",
 ]

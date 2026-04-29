@@ -16,7 +16,7 @@ from stenosis_detection.benchmarking import run_frame_level_benchmark
 
 
 class FrameBenchmarkingTests(unittest.TestCase):
-    def test_frame_benchmark_writes_frame_sequence_and_case_outputs(self) -> None:
+    def test_frame_benchmark_writes_frame_outputs_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             results_root = temp_root / "frame_results"
@@ -66,10 +66,10 @@ class FrameBenchmarkingTests(unittest.TestCase):
             self.assertTrue((output_root / "frame_rows.jsonl").is_file())
             self.assertTrue((output_root / "frame_summary.json").is_file())
             self.assertTrue((output_root / "frame_summary.csv").is_file())
-            self.assertTrue((output_root / "sequence_from_frame_rows.csv").is_file())
-            self.assertTrue((output_root / "sequence_from_frame_summary.json").is_file())
-            self.assertTrue((output_root / "case_from_frame_rows.csv").is_file())
-            self.assertTrue((output_root / "case_from_frame_summary.json").is_file())
+            self.assertFalse((output_root / "sequence_from_frame_rows.csv").exists())
+            self.assertFalse((output_root / "sequence_from_frame_summary.json").exists())
+            self.assertFalse((output_root / "case_from_frame_rows.csv").exists())
+            self.assertFalse((output_root / "case_from_frame_summary.json").exists())
             self.assertTrue((output_root / "threshold_sweep_frame.csv").is_file())
             self.assertTrue((output_root / "threshold_sweep_summary.json").is_file())
 
@@ -89,28 +89,6 @@ class FrameBenchmarkingTests(unittest.TestCase):
             self.assertEqual(result.frame_summary.false_negative, 1)
             self.assertEqual(result.frame_summary.skipped_missing_label, 1)
             self.assertEqual(result.frame_summary.labels_without_prediction, 1)
-
-            sequence_row = self._row_by_key(result.sequence_rows, "case_id", "case_001")
-            self.assertEqual(sequence_row["sequence_id"], "view_01")
-            self.assertEqual(sequence_row["total_frames"], 2)
-            self.assertEqual(sequence_row["positive_frames"], 1)
-            self.assertEqual(sequence_row["negative_frames"], 1)
-            self.assertAlmostEqual(sequence_row["positive_frame_ratio"], 0.5)
-            self.assertAlmostEqual(sequence_row["max_frame_degree"], 0.70)
-            self.assertAlmostEqual(sequence_row["mean_positive_frame_degree"], 0.70)
-            self.assertTrue(sequence_row["predicted_positive_any_frame"])
-            self.assertTrue(sequence_row["predicted_positive_ratio_threshold"])
-            self.assertEqual(sequence_row["weak_outcome_any_frame"], "TP")
-            self.assertEqual(sequence_row["weak_outcome_ratio_threshold"], "TP")
-
-            case_row = self._row_by_key(result.case_rows, "case_id", "case_001")
-            self.assertEqual(case_row["total_frames"], 2)
-            self.assertEqual(case_row["positive_frames"], 1)
-            self.assertEqual(case_row["positive_sequences"], 1)
-            self.assertEqual(case_row["total_sequences"], 1)
-            self.assertTrue(case_row["predicted_positive_any_frame"])
-            self.assertTrue(case_row["predicted_positive_ratio_threshold"])
-            self.assertEqual(case_row["weak_outcome_any_frame"], "TP")
 
             saved_frame_rows = self._read_csv(output_root / "frame_rows.csv")
             self.assertEqual(len(saved_frame_rows), 4)
@@ -152,7 +130,6 @@ class FrameBenchmarkingTests(unittest.TestCase):
 
             self.assertFalse(result.frame_rows[0]["predicted_positive"])
             self.assertEqual(result.frame_rows[0]["weak_outcome"], "FN")
-            self.assertEqual(result.case_rows[0]["positive_frames"], 0)
 
     def _write_frame_result(self, path: Path, *, frame_index: int, stenosis_points: list[dict[str, object]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,12 +165,6 @@ class FrameBenchmarkingTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-
-    def _row_by_key(self, rows: list[dict[str, object]], key: str, value: object) -> dict[str, object]:
-        for row in rows:
-            if row[key] == value:
-                return row
-        self.fail(f"Missing row with {key}={value!r}")
 
     def _read_csv(self, path: Path) -> list[dict[str, str]]:
         with path.open("r", encoding="utf-8", newline="") as handle:
