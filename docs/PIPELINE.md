@@ -342,6 +342,16 @@ python scripts/run_multiview_fusion.py ^
   --output work/case_results/case_001/case_multiview_fusion.json
 ```
 
+If `views.json` contains stale or portable placeholder temporal paths, provide
+the temporal results root separately:
+
+```bash
+python scripts/run_multiview_fusion.py ^
+  --case-root-tree work/keyframes ^
+  --temporal-results-root work/stenosis_temporal_results ^
+  --output-root work/case_results
+```
+
 Expected output:
 
 - One case-level JSON containing `case_id`, `view_count`, `views`,

@@ -79,6 +79,45 @@ class MultiViewFusionTests(unittest.TestCase):
             self.assertTrue((output_root / "case_a" / "case_multiview_fusion_summary.png").is_file())
             self.assertTrue((output_root / "case_a" / "case_multiview_fusion_support_matrix.png").is_file())
 
+    def test_tree_mode_can_use_separate_temporal_results_root(self) -> None:
+        fixture_dir = self._fixture_dir("single_view_case")
+        payload = json.loads((fixture_dir / "multiview_input.json").read_text(encoding="utf-8"))
+        payload["views"][0]["temporal_fusion_json"] = "stale/path/that/should/be/ignored.json"
+        temporal_payload = (fixture_dir / "outputs" / "case_single_view" / "view_01_temporal_fusion.json").read_text(
+            encoding="utf-8"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            case_tree = temp_root / "cases"
+            case_root = case_tree / "case_a"
+            temporal_root = temp_root / "temporal"
+            temporal_output_path = temporal_root / "case_a" / "view_01" / "view_temporal_fusion.json"
+            output_root = temp_root / "outputs"
+
+            case_root.mkdir(parents=True)
+            (case_root / "view_01").mkdir()
+            (case_root / "view_01" / "slice_0001.png").write_bytes(b"placeholder")
+            (case_root / "views.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            temporal_output_path.parent.mkdir(parents=True)
+            temporal_output_path.write_text(temporal_payload, encoding="utf-8")
+
+            loaded_case = load_multiview_case(
+                case_root / "views.json",
+                temporal_results_root=temporal_root,
+                case_root_tree=case_tree,
+            )
+            exit_code = multiview_cli._run_tree_mode(
+                case_tree,
+                output_root,
+                multiview_cli.MultiViewFusionConfig(),
+                temporal_results_root=temporal_root,
+            )
+
+            self.assertEqual(loaded_case.views[0].view_input.temporal_fusion_json_path, temporal_output_path.resolve())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_root / "case_a" / "case_multiview_fusion.json").is_file())
+
     def test_loader_accepts_sequence_based_temporal_view_id_with_friendly_view_id(self) -> None:
         fixture_dir = self._fixture_dir("single_view_case")
         temporal_payload_path = fixture_dir / "outputs" / "case_single_view" / "view_01_temporal_fusion.json"

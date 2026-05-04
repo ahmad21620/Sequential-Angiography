@@ -296,6 +296,16 @@ python run_multiview_fusion.py \
   --output path/to/case_root/case_multiview_fusion.json
 ```
 
+For a tree of `views.json` files with temporal outputs stored under a separate
+root:
+
+```bash
+python run_multiview_fusion.py \
+  --case-root-tree path/to/keyframes_root \
+  --temporal-results-root path/to/stenosis_temporal_results \
+  --output-root path/to/case_results
+```
+
 ### Multi-View Output
 
 The case-level JSON includes:

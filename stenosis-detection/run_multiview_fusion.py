@@ -47,6 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root directory where mirrored case-level fusion outputs will be written in tree mode.",
     )
     parser.add_argument(
+        "--temporal-results-root",
+        help=(
+            "Optional root containing temporal fusion outputs. When provided, "
+            "multi-view fusion resolves each view's temporal JSON under this root "
+            "instead of using temporal_fusion_json paths from views.json."
+        ),
+    )
+    parser.add_argument(
         "--duplicate-angle-distance",
         type=float,
         default=DUPLICATE_VIEW_ANGLE_DISTANCE_DEGREES,
@@ -102,13 +110,30 @@ def main() -> int:
             parser.error("--output is only supported for single-case mode. Use --output-root with --case-root-tree.")
     elif args.output is None:
         parser.error("--output is required for single-case mode.")
+    if args.temporal_results_root is not None:
+        temporal_results_root = Path(args.temporal_results_root)
+        if not temporal_results_root.exists():
+            parser.error(f"--temporal-results-root does not exist: {temporal_results_root}")
+        if not temporal_results_root.is_dir():
+            parser.error(f"--temporal-results-root is not a directory: {temporal_results_root}")
 
     try:
         config = _build_fusion_config(args)
+        temporal_results_root = None if args.temporal_results_root is None else Path(args.temporal_results_root)
         if args.case_root_tree is not None:
-            return _run_tree_mode(Path(args.case_root_tree), Path(args.output_root), config)
+            return _run_tree_mode(
+                Path(args.case_root_tree),
+                Path(args.output_root),
+                config,
+                temporal_results_root=temporal_results_root,
+            )
 
-        _run_one_case(_resolve_case_input_path(args), Path(args.output), config)
+        _run_one_case(
+            _resolve_case_input_path(args),
+            Path(args.output),
+            config,
+            temporal_results_root=temporal_results_root,
+        )
         return 0
     except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
         print(f"Multi-view fusion failed: {exc}", file=sys.stderr)
@@ -137,7 +162,13 @@ def _build_fusion_config(args: argparse.Namespace) -> MultiViewFusionConfig:
     )
 
 
-def _run_tree_mode(case_root_tree: Path, output_root: Path, config: MultiViewFusionConfig) -> int:
+def _run_tree_mode(
+    case_root_tree: Path,
+    output_root: Path,
+    config: MultiViewFusionConfig,
+    *,
+    temporal_results_root: Path | None = None,
+) -> int:
     case_inputs = _discover_case_input_paths(case_root_tree)
     processed = 0
     failed = 0
@@ -145,7 +176,13 @@ def _run_tree_mode(case_root_tree: Path, output_root: Path, config: MultiViewFus
     for case_input_path in case_inputs:
         output_path = _build_tree_output_path(case_input_path, case_root_tree, output_root)
         try:
-            _run_one_case(case_input_path, output_path, config)
+            _run_one_case(
+                case_input_path,
+                output_path,
+                config,
+                temporal_results_root=temporal_results_root,
+                case_root_tree=case_root_tree,
+            )
             processed += 1
         except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
             failed += 1
@@ -173,8 +210,19 @@ def _build_tree_output_path(case_input_path: Path, case_root_tree: Path, output_
     return output_root / relative_case_dir / "case_multiview_fusion.json"
 
 
-def _run_one_case(case_input_path: Path, output_path: Path, config: MultiViewFusionConfig) -> MultiViewCaseResult:
-    multiview_case = load_multiview_case(case_input_path)
+def _run_one_case(
+    case_input_path: Path,
+    output_path: Path,
+    config: MultiViewFusionConfig,
+    *,
+    temporal_results_root: Path | None = None,
+    case_root_tree: Path | None = None,
+) -> MultiViewCaseResult:
+    multiview_case = load_multiview_case(
+        case_input_path,
+        temporal_results_root=temporal_results_root,
+        case_root_tree=case_root_tree,
+    )
     print(f"Loaded case '{multiview_case.case_id}' with {multiview_case.view_count} views.")
 
     case_result = run_multiview_fusion(multiview_case, config=config)

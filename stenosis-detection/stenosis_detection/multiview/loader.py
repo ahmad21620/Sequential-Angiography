@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from math import isfinite
 from pathlib import Path
@@ -20,9 +21,15 @@ class MultiViewLoadError(ValueError):
 
 
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+TEMPORAL_RESULT_FILENAME = "view_temporal_fusion.json"
 
 
-def load_multiview_case_input(case_input_path: str | Path) -> MultiViewCaseInput:
+def load_multiview_case_input(
+    case_input_path: str | Path,
+    *,
+    temporal_results_root: str | Path | None = None,
+    case_root_tree: str | Path | None = None,
+) -> MultiViewCaseInput:
     """Load one case-level multiview input JSON file."""
     resolved_path = Path(case_input_path)
     payload = _read_json_object(resolved_path)
@@ -40,6 +47,14 @@ def load_multiview_case_input(case_input_path: str | Path) -> MultiViewCaseInput
         )
         for index, item in enumerate(raw_views)
     ]
+    if temporal_results_root is not None:
+        views = _override_temporal_fusion_paths(
+            views,
+            case_id=case_id,
+            case_input_path=resolved_path,
+            temporal_results_root=Path(temporal_results_root),
+            case_root_tree=None if case_root_tree is None else Path(case_root_tree),
+        )
     _validate_unique_view_ids(views, context=context)
     return MultiViewCaseInput(case_id=case_id, views=views)
 
@@ -73,9 +88,18 @@ def load_multiview_view_result(view_input: MultiViewViewInput) -> LoadedMultiVie
     )
 
 
-def load_multiview_case(case_input_path: str | Path) -> LoadedMultiViewCase:
+def load_multiview_case(
+    case_input_path: str | Path,
+    *,
+    temporal_results_root: str | Path | None = None,
+    case_root_tree: str | Path | None = None,
+) -> LoadedMultiViewCase:
     """Load one case input plus all referenced temporal fusion outputs."""
-    case_input = load_multiview_case_input(case_input_path)
+    case_input = load_multiview_case_input(
+        case_input_path,
+        temporal_results_root=temporal_results_root,
+        case_root_tree=case_root_tree,
+    )
     available_views = _filter_available_views(case_input.views, case_input_path=Path(case_input_path))
     return LoadedMultiViewCase(
         case_id=case_input.case_id,
@@ -269,6 +293,122 @@ def _resolve_temporal_fusion_json_path(base_dir: Path, raw_path: str) -> Path:
     if not candidate_path.is_absolute():
         candidate_path = base_dir / candidate_path
     return candidate_path.resolve()
+
+
+def _override_temporal_fusion_paths(
+    views: list[MultiViewViewInput],
+    *,
+    case_id: str,
+    case_input_path: Path,
+    temporal_results_root: Path,
+    case_root_tree: Path | None,
+) -> list[MultiViewViewInput]:
+    resolved_temporal_root = temporal_results_root.resolve()
+    case_relative_paths = _temporal_case_relative_path_candidates(
+        case_id=case_id,
+        case_input_path=case_input_path,
+        case_root_tree=case_root_tree,
+    )
+
+    overridden_views: list[MultiViewViewInput] = []
+    for view in views:
+        candidates = _temporal_override_candidates(
+            view,
+            temporal_results_root=resolved_temporal_root,
+            case_relative_paths=case_relative_paths,
+        )
+        selected_path = next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
+        overridden_views.append(replace(view, temporal_fusion_json_path=selected_path.resolve()))
+
+    return overridden_views
+
+
+def _temporal_case_relative_path_candidates(
+    *,
+    case_id: str,
+    case_input_path: Path,
+    case_root_tree: Path | None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    if case_root_tree is not None:
+        try:
+            candidates.append(case_input_path.parent.resolve().relative_to(case_root_tree.resolve()))
+        except ValueError as exc:
+            raise MultiViewLoadError(
+                f"{case_input_path}: case input is not under --case-root-tree '{case_root_tree}'."
+            ) from exc
+
+    candidates.extend(_identifier_to_relative_paths(case_id))
+    candidates.append(Path(case_input_path.parent.name))
+    return _deduplicate_relative_paths(candidates)
+
+
+def _temporal_override_candidates(
+    view: MultiViewViewInput,
+    *,
+    temporal_results_root: Path,
+    case_relative_paths: list[Path],
+) -> list[Path]:
+    view_relative_paths = _deduplicate_relative_paths(
+        [
+            *_identifier_to_relative_paths(view.sequence_id),
+            *_identifier_to_relative_paths(view.view_id),
+        ]
+    )
+    candidates: list[Path] = []
+    for case_relative_path in case_relative_paths:
+        for view_relative_path in view_relative_paths:
+            candidates.append(temporal_results_root / case_relative_path / view_relative_path / TEMPORAL_RESULT_FILENAME)
+    for view_relative_path in view_relative_paths:
+        candidates.append(temporal_results_root / view_relative_path / TEMPORAL_RESULT_FILENAME)
+    return _deduplicate_absolute_paths(candidates)
+
+
+def _identifier_to_relative_paths(identifier: str) -> list[Path]:
+    normalized_identifier = _normalize_view_identifier(identifier)
+    if not normalized_identifier:
+        return []
+
+    parts = _safe_path_parts(normalized_identifier)
+    if not parts:
+        return []
+
+    paths = [Path(*parts)]
+    if len(parts) > 1:
+        paths.append(Path(parts[-1]))
+    return paths
+
+
+def _safe_path_parts(identifier: str) -> list[str]:
+    return [part for part in identifier.replace("\\", "/").split("/") if part not in {"", ".", ".."}]
+
+
+def _deduplicate_relative_paths(paths: list[Path]) -> list[Path]:
+    deduplicated: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        clean_parts = [part for part in path.parts if part not in {"", ".", ".."}]
+        if not clean_parts:
+            continue
+        clean_path = Path(*clean_parts)
+        key = clean_path.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(clean_path)
+    return deduplicated
+
+
+def _deduplicate_absolute_paths(paths: list[Path]) -> list[Path]:
+    deduplicated: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(path)
+    return deduplicated
 
 
 def _temporal_view_matches_input(temporal_view_id: str, view_input: MultiViewViewInput) -> bool:
