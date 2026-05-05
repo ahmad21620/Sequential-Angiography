@@ -40,7 +40,7 @@ python run_stenosis_detection.py \
 The batch runner:
 
 - walks the entire original-image tree recursively
-- matches each `slice_####` image with a corresponding `slice_####_mask` file in the mirrored mask tree
+- matches each supported frame image with a corresponding `<image_stem>_mask` file in the mirrored mask tree
 - writes outputs into a mirrored tree under `--output-root`
 - skips slices that already have a full output set unless `--overwrite` is used
 - shows a `tqdm` progress bar during processing
@@ -56,6 +56,7 @@ Mask files:
 
 - `slice_0001_mask.png`
 - `slice_0123_mask.jpg`
+- `p1_v1_00012_mask.png`
 
 The folder hierarchy under the image root and mask root should match.
 

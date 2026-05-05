@@ -13,6 +13,7 @@ from .models import FrameLevelResult, LesionObservation, ViewSequence, classify_
 
 
 SLICE_FRAME_PATTERN = re.compile(r"^slice_(\d+)$", re.IGNORECASE)
+CADICA_FRAME_PATTERN = re.compile(r"^p\d+_v\d+_(\d+)$", re.IGNORECASE)
 FRAME_RESULT_SUFFIX = "_stenosis_results.json"
 DEFAULT_VIEW_FRAME_COUNT = 12
 
@@ -223,7 +224,7 @@ def _path_filename(path: str | Path) -> str:
 
 
 def _extract_frame_index(image_stem: str) -> int | None:
-    match = SLICE_FRAME_PATTERN.match(image_stem)
+    match = SLICE_FRAME_PATTERN.match(image_stem) or CADICA_FRAME_PATTERN.match(image_stem)
     if match is None:
         return None
     return int(match.group(1))

@@ -122,6 +122,8 @@ work/vessel_masks/case_001/view_01/slice_0003_mask.png
 
 The required pattern is `<image_stem>_mask.png`. The extension can be another
 supported image extension, but the `_mask` suffix is required.
+CADICA frame names such as `p1_v1_00012.png` are also supported when the mask is
+named `p1_v1_00012_mask.png` in the mirrored mask tree.
 
 ## Installation
 
@@ -251,7 +253,8 @@ work/stenosis_frame_results/batch_summary.json
 
 The stenosis detector matches images and masks by mirrored relative path and
 mask stem. If the image is `slice_0003.png`, the mask must be named
-`slice_0003_mask.png`.
+`slice_0003_mask.png`. CADICA names such as `p1_v1_00012.png` are accepted with
+matching masks such as `p1_v1_00012_mask.png`.
 
 ## Temporal Fusion
 

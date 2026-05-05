@@ -51,6 +51,8 @@ except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
 SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 ORIGINAL_SLICE_PATTERN = re.compile(r"^slice_(\d+)$", re.IGNORECASE)
 MASK_SLICE_PATTERN = re.compile(r"^slice_(\d+)_mask$", re.IGNORECASE)
+CADICA_FRAME_PATTERN = re.compile(r"^p\d+_v\d+_\d+$", re.IGNORECASE)
+CADICA_MASK_PATTERN = re.compile(r"^p\d+_v\d+_\d+_mask$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -136,12 +138,15 @@ def discover_tree_jobs(images_root: str | Path, masks_root: str | Path) -> list[
         suffix = " ..." if len(missing_masks) > 10 else ""
         raise FileNotFoundError(
             f"Missing mask files for {len(missing_masks)} image(s). "
-            f"Expected matching slice_*_mask files in the mirrored mask tree. "
+            f"Expected matching <image_stem>_mask files in the mirrored mask tree. "
             f"Examples: {preview}{suffix}"
         )
 
     if not jobs:
-        raise FileNotFoundError(f"No slice_#### image files were found under: {resolved_images_root}")
+        raise FileNotFoundError(
+            f"No supported frame image files were found under: {resolved_images_root}. "
+            "Expected names like slice_0001.png or p1_v1_00012.png."
+        )
 
     return jobs
 
@@ -257,7 +262,7 @@ def _iter_candidate_images(root: Path):
             continue
         if path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
             continue
-        if ORIGINAL_SLICE_PATTERN.match(path.stem):
+        if _is_supported_frame_stem(path.stem):
             yield path
 
 
@@ -269,7 +274,7 @@ def _build_mask_index(masks_root: Path) -> dict[tuple[str, str], Path]:
             continue
         if path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
             continue
-        if not MASK_SLICE_PATTERN.match(path.stem):
+        if not _is_supported_mask_stem(path.stem):
             continue
 
         relative_path = path.relative_to(masks_root)
@@ -284,6 +289,14 @@ def _build_mask_index(masks_root: Path) -> dict[tuple[str, str], Path]:
         mask_index[key] = path
 
     return mask_index
+
+
+def _is_supported_frame_stem(stem: str) -> bool:
+    return ORIGINAL_SLICE_PATTERN.match(stem) is not None or CADICA_FRAME_PATTERN.match(stem) is not None
+
+
+def _is_supported_mask_stem(stem: str) -> bool:
+    return MASK_SLICE_PATTERN.match(stem) is not None or CADICA_MASK_PATTERN.match(stem) is not None
 
 
 def _resolve_worker_count(workers: int) -> int:

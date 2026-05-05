@@ -16,6 +16,7 @@ from .thinning import thin_binary_mask
 
 
 SLICE_FRAME_PATTERN = re.compile(r"^slice_(\d+)$", re.IGNORECASE)
+CADICA_FRAME_PATTERN = re.compile(r"^p\d+_v\d+_(\d+)$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -762,7 +763,7 @@ def _serialize_points_xy(points_xy: np.ndarray) -> list[list[int]]:
 
 
 def _extract_frame_index(image_path: Path) -> int | None:
-    match = SLICE_FRAME_PATTERN.match(image_path.stem)
+    match = SLICE_FRAME_PATTERN.match(image_path.stem) or CADICA_FRAME_PATTERN.match(image_path.stem)
     if match is None:
         return None
 
