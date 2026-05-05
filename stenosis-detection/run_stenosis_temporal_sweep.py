@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from stenosis_detection import DEFAULT_VIEW_FRAME_COUNT, PipelineConfig, TemporalLoadError, VIDEO_FORMATS
+from stenosis_detection import DEFAULT_VIEW_FRAME_COUNT, MultiViewFusionConfig, PipelineConfig, TemporalLoadError, VIDEO_FORMATS
 from stenosis_detection.parameter_sweep import run_parameter_sweep
 from stenosis_detection.temporal import DEFAULT_VIDEO_FPS
 
@@ -53,6 +53,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--write-video", action="store_true", help="Write temporal demo videos for each temporal variant.")
     parser.add_argument("--video-fps", type=float, default=DEFAULT_VIDEO_FPS, help="FPS for optional temporal videos.")
     parser.add_argument("--video-format", choices=VIDEO_FORMATS, default="mp4", help="Optional temporal video format.")
+    parser.add_argument(
+        "--run-multiview",
+        action="store_true",
+        help="After each temporal variant, run one fixed multi-view fusion pass.",
+    )
+    parser.add_argument(
+        "--multiview-case-root-tree",
+        help="Root containing case views.json files. Defaults to --images-root.",
+    )
+    parser.add_argument(
+        "--multiview-output-root",
+        help="Root where multi-view sweep outputs will be written. Defaults to <output-root>/multiview_results.",
+    )
+    parser.add_argument(
+        "--multiview-view-diversity-mode",
+        choices=["angle", "projection_group", "auto"],
+        default="angle",
+        help="Multi-view diversity mode. Use projection_group for CADICA.",
+    )
+    parser.add_argument(
+        "--multiview-split-by-coronary-side",
+        action="store_true",
+        help="Run separate left/right multi-view fusion using coronary_side metadata.",
+    )
 
     parser.add_argument("--stenosis-thresholds", help="Comma-separated frame-level stenosis thresholds.")
     parser.add_argument("--average-radius-thresholds", help="Comma-separated average-radius thresholds.")
@@ -121,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
             write_video=args.write_video,
             video_fps=args.video_fps,
             video_format=args.video_format,
+            run_multiview=args.run_multiview,
+            multiview_case_root_tree=args.multiview_case_root_tree,
+            multiview_output_root=args.multiview_output_root,
+            multiview_config=MultiViewFusionConfig(view_diversity_mode=args.multiview_view_diversity_mode),
+            split_multiview_by_coronary_side=args.multiview_split_by_coronary_side,
         )
     except (FileNotFoundError, NotADirectoryError, TemporalLoadError, ValueError, OSError) as exc:
         print(f"Parameter sweep failed: {exc}", file=sys.stderr)
@@ -130,10 +159,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Temporal variants: {len(result.temporal_variants)}")
     print(f"Frame results root: {result.frame_results_root}")
     print(f"Temporal results root: {result.temporal_results_root}")
+    if result.multiview_results_root is not None:
+        print(f"Multi-view results root: {result.multiview_results_root}")
     print(f"Frame failures: {result.frame_summary.failed}")
     print(f"Temporal failed jobs: {result.temporal_summary.failed_jobs}")
+    multiview_failed_cases = 0 if result.multiview_summary is None else result.multiview_summary.failed_cases
+    if result.multiview_summary is not None:
+        print(f"Multi-view failed cases: {multiview_failed_cases}")
     print(f"Summary: {result.summary_json}")
-    return 0 if result.frame_summary.failed == 0 and result.temporal_summary.failed_jobs == 0 else 1
+    return (
+        0
+        if result.frame_summary.failed == 0
+        and result.temporal_summary.failed_jobs == 0
+        and multiview_failed_cases == 0
+        else 1
+    )
 
 
 def _build_base_config(args: argparse.Namespace) -> PipelineConfig:

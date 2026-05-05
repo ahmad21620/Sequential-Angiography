@@ -8,6 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from .batch import BatchProcessSummary, discover_tree_jobs, process_tree
+from .multiview import (
+    LoadedMultiViewCase,
+    LoadedMultiViewView,
+    MultiViewFusionConfig,
+    build_multiview_visualization_paths,
+    load_multiview_case,
+    run_multiview_fusion,
+    save_multiview_case_result,
+    save_multiview_visualization_outputs,
+)
 from .pipeline import PipelineConfig
 from .temporal import (
     DEFAULT_MIN_PERSISTENCE_RATIO,
@@ -126,14 +136,42 @@ class TemporalSweepSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class MultiViewSweepFailure:
+    frame_variant_name: str
+    temporal_variant_name: str
+    case_input_path: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class MultiViewSweepSummary:
+    total_jobs: int
+    processed_cases: int
+    skipped_cases: int
+    failed_cases: int
+    failures: tuple[MultiViewSweepFailure, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_jobs": self.total_jobs,
+            "processed_cases": self.processed_cases,
+            "skipped_cases": self.skipped_cases,
+            "failed_cases": self.failed_cases,
+            "failures": [asdict(failure) for failure in self.failures],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ParameterSweepResult:
     output_root: Path
     frame_results_root: Path
     temporal_results_root: Path
+    multiview_results_root: Path | None
     frame_variants: tuple[FrameSweepVariant, ...]
     temporal_variants: tuple[TemporalSweepVariant, ...]
     frame_summary: BatchProcessSummary
     temporal_summary: TemporalSweepSummary
+    multiview_summary: MultiViewSweepSummary | None
     summary_json: Path
 
 
@@ -158,6 +196,11 @@ def run_parameter_sweep(
     write_video: bool = False,
     video_fps: float = DEFAULT_VIDEO_FPS,
     video_format: str = "mp4",
+    run_multiview: bool = False,
+    multiview_case_root_tree: str | Path | None = None,
+    multiview_output_root: str | Path | None = None,
+    multiview_config: MultiViewFusionConfig | None = None,
+    split_multiview_by_coronary_side: bool = False,
 ) -> ParameterSweepResult:
     if video_format not in VIDEO_FORMATS:
         raise ValueError(f"video_format must be one of {VIDEO_FORMATS}, got {video_format!r}.")
@@ -202,6 +245,24 @@ def run_parameter_sweep(
         video_fps=video_fps,
         video_format=video_format,
     )
+    resolved_multiview_results_root = None
+    multiview_summary = None
+    if run_multiview:
+        resolved_multiview_results_root = (
+            Path(multiview_output_root)
+            if multiview_output_root is not None
+            else resolved_output_root / "multiview_results"
+        )
+        multiview_summary = run_multiview_sweep(
+            case_root_tree=Path(images_root) if multiview_case_root_tree is None else Path(multiview_case_root_tree),
+            temporal_results_root=temporal_results_root,
+            output_root=resolved_multiview_results_root,
+            frame_variants=frame_variants,
+            temporal_variants=temporal_variants,
+            config=MultiViewFusionConfig() if multiview_config is None else multiview_config,
+            split_by_coronary_side=split_multiview_by_coronary_side,
+            skip_existing=skip_existing,
+        )
 
     summary_json = resolved_output_root / "parameter_sweep_summary.json"
     resolved_output_root.mkdir(parents=True, exist_ok=True)
@@ -213,10 +274,12 @@ def run_parameter_sweep(
                 output_root=resolved_output_root,
                 frame_results_root=frame_results_root,
                 temporal_results_root=temporal_results_root,
+                multiview_results_root=resolved_multiview_results_root,
                 frame_variants=frame_variants,
                 temporal_variants=temporal_variants,
                 frame_summary=frame_summary,
                 temporal_summary=temporal_summary,
+                multiview_summary=multiview_summary,
                 allow_variable_frame_count=allow_variable_frame_count,
                 expected_frame_count=expected_frame_count,
                 skip_existing=skip_existing,
@@ -224,6 +287,12 @@ def run_parameter_sweep(
                 write_video=write_video,
                 video_fps=video_fps,
                 video_format=video_format,
+                run_multiview=run_multiview,
+                multiview_case_root_tree=(
+                    Path(images_root) if multiview_case_root_tree is None else Path(multiview_case_root_tree)
+                ),
+                multiview_config=MultiViewFusionConfig() if multiview_config is None else multiview_config,
+                split_multiview_by_coronary_side=split_multiview_by_coronary_side,
             ),
             indent=2,
             sort_keys=True,
@@ -235,10 +304,12 @@ def run_parameter_sweep(
         output_root=resolved_output_root,
         frame_results_root=frame_results_root,
         temporal_results_root=temporal_results_root,
+        multiview_results_root=resolved_multiview_results_root,
         frame_variants=tuple(frame_variants),
         temporal_variants=tuple(temporal_variants),
         frame_summary=frame_summary,
         temporal_summary=temporal_summary,
+        multiview_summary=multiview_summary,
         summary_json=summary_json,
     )
 
@@ -407,6 +478,89 @@ def run_temporal_sweep(
     )
 
 
+def run_multiview_sweep(
+    *,
+    case_root_tree: str | Path,
+    temporal_results_root: str | Path,
+    output_root: str | Path,
+    frame_variants: list[FrameSweepVariant],
+    temporal_variants: list[TemporalSweepVariant],
+    config: MultiViewFusionConfig,
+    split_by_coronary_side: bool,
+    skip_existing: bool,
+) -> MultiViewSweepSummary:
+    resolved_case_root_tree = Path(case_root_tree)
+    resolved_temporal_results_root = Path(temporal_results_root)
+    resolved_output_root = Path(output_root)
+    case_input_paths = _discover_multiview_case_input_paths(resolved_case_root_tree)
+    jobs = [
+        (frame_variant, temporal_variant, case_input_path)
+        for frame_variant in frame_variants
+        for temporal_variant in temporal_variants
+        for case_input_path in case_input_paths
+    ]
+
+    processed_cases = 0
+    skipped_cases = 0
+    failures: list[MultiViewSweepFailure] = []
+
+    with tqdm(total=len(jobs), desc="Sweeping multi-view fusion", unit="case", dynamic_ncols=True) as progress:
+        for frame_variant, temporal_variant, case_input_path in jobs:
+            temporal_variant_root = resolved_temporal_results_root / frame_variant.name / temporal_variant.name
+            output_path = _multiview_output_path(
+                case_input_path,
+                case_root_tree=resolved_case_root_tree,
+                output_root=resolved_output_root / frame_variant.name / temporal_variant.name,
+            )
+            if skip_existing and _is_multiview_output_complete(
+                output_path,
+                split_by_coronary_side=split_by_coronary_side,
+            ):
+                skipped_cases += 1
+                progress.update(1)
+                _set_multiview_progress(progress, processed_cases, skipped_cases, len(failures))
+                continue
+
+            try:
+                multiview_case = load_multiview_case(
+                    case_input_path,
+                    temporal_results_root=temporal_variant_root,
+                    case_root_tree=resolved_case_root_tree,
+                )
+                if split_by_coronary_side:
+                    _save_split_multiview_case_result(multiview_case, output_path, config)
+                else:
+                    case_result = run_multiview_fusion(multiview_case, config=config)
+                    saved_path = save_multiview_case_result(case_result, output_path)
+                    save_multiview_visualization_outputs(case_result, saved_path)
+            except Exception as exc:  # pragma: no cover - protects long sweeps.
+                failures.append(
+                    MultiViewSweepFailure(
+                        frame_variant_name=frame_variant.name,
+                        temporal_variant_name=temporal_variant.name,
+                        case_input_path=str(case_input_path),
+                        error=str(exc),
+                    )
+                )
+                progress.write(
+                    "Failed multi-view sweep: "
+                    f"{frame_variant.name}/{temporal_variant.name}/{case_input_path} -> {exc}"
+                )
+            else:
+                processed_cases += 1
+
+            progress.update(1)
+            _set_multiview_progress(progress, processed_cases, skipped_cases, len(failures))
+
+    return MultiViewSweepSummary(
+        total_jobs=len(jobs),
+        processed_cases=processed_cases,
+        skipped_cases=skipped_cases,
+        failed_cases=len(failures),
+        failures=tuple(failures),
+    )
+
+
 def frame_variant_name(config: PipelineConfig) -> str:
     return (
         f"radius_outside_fraction_threshold_{_format_value(config.radius_outside_fraction_threshold)}"
@@ -486,6 +640,78 @@ def _is_temporal_variant_complete(output_path: Path, *, write_video: bool, video
     return all(path.is_file() and path.stat().st_size > 0 for path in expected_paths)
 
 
+def _discover_multiview_case_input_paths(case_root_tree: Path) -> list[Path]:
+    if not case_root_tree.exists():
+        raise FileNotFoundError(f"Multi-view case root tree does not exist: {case_root_tree}")
+    if not case_root_tree.is_dir():
+        raise NotADirectoryError(f"Multi-view case root tree is not a directory: {case_root_tree}")
+
+    case_input_paths = sorted(path for path in case_root_tree.rglob("views.json") if path.is_file())
+    if not case_input_paths:
+        raise FileNotFoundError(f"No views.json files were found under: {case_root_tree}")
+    return case_input_paths
+
+
+def _multiview_output_path(case_input_path: Path, *, case_root_tree: Path, output_root: Path) -> Path:
+    relative_case_dir = case_input_path.parent.resolve().relative_to(case_root_tree.resolve())
+    return output_root / relative_case_dir / "case_multiview_fusion.json"
+
+
+def _is_multiview_output_complete(output_path: Path, *, split_by_coronary_side: bool) -> bool:
+    expected_paths = [output_path]
+    if not split_by_coronary_side:
+        visualization_paths = build_multiview_visualization_paths(output_path)
+        expected_paths.extend(
+            [
+                visualization_paths["summary_png"],
+                visualization_paths["support_matrix_png"],
+            ]
+        )
+    return all(path.is_file() and path.stat().st_size > 0 for path in expected_paths)
+
+
+def _save_split_multiview_case_result(
+    multiview_case: LoadedMultiViewCase,
+    output_path: Path,
+    config: MultiViewFusionConfig,
+) -> Path:
+    side_groups = _split_views_by_coronary_side(multiview_case)
+    side_results: dict[str, object] = {}
+    skipped_sides: list[str] = []
+    for side in ("left", "right"):
+        side_views = side_groups[side]
+        if not side_views:
+            skipped_sides.append(side)
+            continue
+        side_case = LoadedMultiViewCase(
+            case_id=f"{multiview_case.case_id}:{side}",
+            views=side_views,
+        )
+        side_results[side] = run_multiview_fusion(side_case, config=config).to_dict()
+
+    payload: dict[str, object] = {
+        "case_id": multiview_case.case_id,
+        "split_by_coronary_side": True,
+        "view_diversity_mode": config.view_diversity_mode,
+        "side_results": side_results,
+        "unknown_views": [view.view_input.to_dict() for view in side_groups["unknown"]],
+        "skipped_sides": skipped_sides,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return output_path
+
+
+def _split_views_by_coronary_side(multiview_case: LoadedMultiViewCase) -> dict[str, list[LoadedMultiViewView]]:
+    groups: dict[str, list[LoadedMultiViewView]] = {"left": [], "right": [], "unknown": []}
+    for view in multiview_case.views:
+        side = (view.view_input.coronary_side or "unknown").strip().lower()
+        if side not in {"left", "right"}:
+            side = "unknown"
+        groups[side].append(view)
+    return groups
+
+
 def _resolve_relative_view_path(view_sequence: ViewSequence, frame_variant_root: Path) -> Path:
     frame_result_parent = view_sequence.frames[0].result_path.resolve().parent
     try:
@@ -519,6 +745,14 @@ def _set_temporal_progress(progress, processed_variants: int, skipped_variants: 
     )
 
 
+def _set_multiview_progress(progress, processed_cases: int, skipped_cases: int, failed_cases: int) -> None:
+    progress.set_postfix(
+        processed_cases=processed_cases,
+        skipped_cases=skipped_cases,
+        failed_cases=failed_cases,
+    )
+
+
 def _write_job_messages(result: TemporalSweepJobResult, *, log=print) -> None:
     for message in result.messages:
         log(message)
@@ -531,10 +765,12 @@ def _sweep_summary_payload(
     output_root: Path,
     frame_results_root: Path,
     temporal_results_root: Path,
+    multiview_results_root: Path | None,
     frame_variants: list[FrameSweepVariant],
     temporal_variants: list[TemporalSweepVariant],
     frame_summary: BatchProcessSummary,
     temporal_summary: TemporalSweepSummary,
+    multiview_summary: MultiViewSweepSummary | None,
     allow_variable_frame_count: bool,
     expected_frame_count: int,
     skip_existing: bool,
@@ -542,6 +778,10 @@ def _sweep_summary_payload(
     write_video: bool,
     video_fps: float,
     video_format: str,
+    run_multiview: bool,
+    multiview_case_root_tree: Path,
+    multiview_config: MultiViewFusionConfig,
+    split_multiview_by_coronary_side: bool,
 ) -> dict[str, Any]:
     return {
         "inputs": {
@@ -552,6 +792,7 @@ def _sweep_summary_payload(
             "output_root": str(output_root),
             "frame_results_root": str(frame_results_root),
             "temporal_results_root": str(temporal_results_root),
+            "multiview_results_root": None if multiview_results_root is None else str(multiview_results_root),
         },
         "config": {
             "allow_variable_frame_count": allow_variable_frame_count,
@@ -561,6 +802,10 @@ def _sweep_summary_payload(
             "write_video": write_video,
             "video_fps": video_fps,
             "video_format": video_format,
+            "run_multiview": run_multiview,
+            "multiview_case_root_tree": str(multiview_case_root_tree),
+            "multiview_config": multiview_config.to_dict(),
+            "split_multiview_by_coronary_side": split_multiview_by_coronary_side,
         },
         "frame_variants": [
             {"name": variant.name, "config": asdict(variant.config)}
@@ -572,6 +817,7 @@ def _sweep_summary_payload(
         ],
         "frame_summary": frame_summary.to_dict(),
         "temporal_summary": temporal_summary.to_dict(),
+        "multiview_summary": None if multiview_summary is None else multiview_summary.to_dict(),
     }
 
 

@@ -79,13 +79,19 @@ python ../scripts/run_stenosis_temporal_sweep.py \
   --radius-outside-fraction-thresholds 0.05,0.10 \
   --radius-min-outside-samples-values 2,3 \
   --min-supporting-frames-values 2,3 \
-  --min-persistence-ratios 0.25,0.50
+  --min-persistence-ratios 0.25,0.50 \
+  --run-multiview \
+  --multiview-case-root-tree ../work/cadica_keyframes \
+  --multiview-view-diversity-mode projection_group \
+  --multiview-split-by-coronary-side
 ```
 
 Frame outputs are grouped under `frame_results/<frame_variant>/...`; temporal
 outputs are grouped under
-`temporal_results/<frame_variant>/<temporal_variant>/...`. Existing outputs are
-skipped by default; pass `--overwrite` to force a rerun.
+`temporal_results/<frame_variant>/<temporal_variant>/...`. With
+`--run-multiview`, case outputs are grouped under
+`multiview_results/<frame_variant>/<temporal_variant>/...`. Existing outputs
+are skipped by default; pass `--overwrite` to force a rerun.
 
 ### Mirrored Outputs
 

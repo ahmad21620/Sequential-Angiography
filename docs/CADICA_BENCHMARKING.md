@@ -111,8 +111,16 @@ python scripts/run_stenosis_temporal_sweep.py \
   --radius-outside-fraction-thresholds 0.05,0.10 \
   --radius-min-outside-samples-values 2,3 \
   --min-supporting-frames-values 2,3 \
-  --min-persistence-ratios 0.25,0.50
+  --min-persistence-ratios 0.25,0.50 \
+  --run-multiview \
+  --multiview-case-root-tree work/cadica_keyframes \
+  --multiview-view-diversity-mode projection_group \
+  --multiview-split-by-coronary-side
 ```
+
+The multi-view step does not add another hyperparameter grid. It runs once for
+each frame/temporal variant combination and writes outputs under
+`work/cadica_sweep/multiview_results/<frame_variant>/<temporal_variant>/`.
 
 ## 4. Run Temporal Fusion
 

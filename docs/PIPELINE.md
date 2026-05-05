@@ -313,7 +313,11 @@ python scripts/run_stenosis_temporal_sweep.py \
   --radius-outside-fraction-thresholds 0.05,0.10 \
   --radius-min-outside-samples-values 2,3 \
   --min-supporting-frames-values 2,3 \
-  --min-persistence-ratios 0.25,0.50
+  --min-persistence-ratios 0.25,0.50 \
+  --run-multiview \
+  --multiview-case-root-tree work/cadica_keyframes \
+  --multiview-view-diversity-mode projection_group \
+  --multiview-split-by-coronary-side
 ```
 
 The runner writes:
@@ -322,6 +326,7 @@ The runner writes:
 work/cadica_sweep/
   frame_results/<frame_variant>/pX/vY/*_stenosis_results.json
   temporal_results/<frame_variant>/<temporal_variant>/pX/vY/view_temporal_fusion.json
+  multiview_results/<frame_variant>/<temporal_variant>/pX/case_multiview_fusion.json
   parameter_sweep_summary.json
 ```
 
@@ -331,6 +336,9 @@ view loading, registration, mapping, and lesion tracking. Frame and temporal
 stages are CPU-bound; `--workers 0` and `--temporal-workers 0` use all CPU
 cores for their respective stages. GPU acceleration is used earlier by vessel
 segmentation when `--device cuda` is selected.
+
+`--run-multiview` adds a fixed multi-view pass after temporal fusion for each
+frame/temporal variant combination. It does not add multi-view hyperparameters.
 
 ## Multi-View Fusion
 
