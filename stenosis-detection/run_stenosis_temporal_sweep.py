@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+from stenosis_detection import DEFAULT_VIEW_FRAME_COUNT, PipelineConfig, TemporalLoadError, VIDEO_FORMATS
+from stenosis_detection.parameter_sweep import run_parameter_sweep
+from stenosis_detection.temporal import DEFAULT_VIDEO_FPS
+
+
+def build_parser() -> argparse.ArgumentParser:
+    defaults = PipelineConfig()
+    parser = argparse.ArgumentParser(
+        description="Run an optimized frame-level and temporal-fusion parameter sweep.",
+    )
+    parser.add_argument("--images-root", required=True, help="Root containing extracted keyframe images.")
+    parser.add_argument("--masks-root", required=True, help="Root containing mirrored vessel masks.")
+    parser.add_argument("--output-root", required=True, help="Root where sweep outputs will be written.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Frame-level worker processes. Use 0 for all CPU cores. Default: 1.",
+    )
+    parser.add_argument(
+        "--temporal-workers",
+        type=int,
+        default=1,
+        help="Temporal-fusion worker processes. Use 0 for all CPU cores. Default: 1.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-run variants even when their expected outputs already exist.",
+    )
+    parser.add_argument(
+        "--no-debug-images",
+        action="store_true",
+        help="Write only frame-level JSON outputs and skip frame-level PNG debug images.",
+    )
+    parser.add_argument(
+        "--allow-variable-frame-count",
+        action="store_true",
+        help="Allow each view to have its own frame count. Use this for CADICA.",
+    )
+    parser.add_argument(
+        "--expected-frame-count",
+        type=int,
+        default=DEFAULT_VIEW_FRAME_COUNT,
+        help="Expected frame-result count per view when variable counts are not allowed.",
+    )
+    parser.add_argument("--write-video", action="store_true", help="Write temporal demo videos for each temporal variant.")
+    parser.add_argument("--video-fps", type=float, default=DEFAULT_VIDEO_FPS, help="FPS for optional temporal videos.")
+    parser.add_argument("--video-format", choices=VIDEO_FORMATS, default="mp4", help="Optional temporal video format.")
+
+    parser.add_argument("--stenosis-thresholds", help="Comma-separated frame-level stenosis thresholds.")
+    parser.add_argument("--average-radius-thresholds", help="Comma-separated average-radius thresholds.")
+    parser.add_argument("--radius-outside-fraction-thresholds", help="Comma-separated radius outside-fraction thresholds.")
+    parser.add_argument("--radius-min-outside-samples-values", help="Comma-separated radius minimum outside-sample counts.")
+    parser.add_argument("--min-supporting-frames-values", help="Comma-separated temporal minimum supporting-frame counts.")
+    parser.add_argument("--min-persistence-ratios", help="Comma-separated temporal minimum persistence ratios.")
+
+    parser.add_argument("--mask-threshold", type=int, default=defaults.mask_threshold)
+    parser.add_argument("--min-component-area", type=int, default=defaults.min_component_area)
+    parser.add_argument(
+        "--remove-border-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.remove_border_artifacts,
+    )
+    parser.add_argument("--border-margin-px", type=int, default=defaults.border_margin_px)
+    parser.add_argument("--border-artifact-max-height", type=int, default=defaults.border_artifact_max_height)
+    parser.add_argument("--border-artifact-min-width-ratio", type=float, default=defaults.border_artifact_min_width_ratio)
+    parser.add_argument("--radius-search-range", type=float, default=defaults.radius_search_range)
+    parser.add_argument("--radius-vessel-threshold", type=int, default=defaults.radius_vessel_threshold)
+    parser.add_argument("--segmentation-distance-threshold", type=float, default=defaults.segmentation_distance_threshold)
+    parser.add_argument("--final-point-distance-threshold", type=float, default=defaults.final_point_distance_threshold)
+    parser.add_argument("--branch-point-exclusion-distance", type=float, default=defaults.branch_point_exclusion_distance)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.workers < 0:
+        parser.error("--workers must be 0 or greater.")
+    if args.temporal_workers < 0:
+        parser.error("--temporal-workers must be 0 or greater.")
+    if not args.allow_variable_frame_count and args.expected_frame_count < 1:
+        parser.error("--expected-frame-count must be at least 1.")
+    if args.video_fps <= 0.0:
+        parser.error("--video-fps must be positive.")
+
+    try:
+        result = run_parameter_sweep(
+            images_root=args.images_root,
+            masks_root=args.masks_root,
+            output_root=args.output_root,
+            stenosis_thresholds=_parse_float_list(args.stenosis_thresholds, "--stenosis-thresholds"),
+            average_radius_thresholds=_parse_float_list(args.average_radius_thresholds, "--average-radius-thresholds"),
+            radius_outside_fraction_thresholds=_parse_float_list(
+                args.radius_outside_fraction_thresholds,
+                "--radius-outside-fraction-thresholds",
+            ),
+            radius_min_outside_samples_values=_parse_int_list(
+                args.radius_min_outside_samples_values,
+                "--radius-min-outside-samples-values",
+            ),
+            min_supporting_frames_values=_parse_int_list(
+                args.min_supporting_frames_values,
+                "--min-supporting-frames-values",
+            ),
+            min_persistence_ratios=_parse_float_list(args.min_persistence_ratios, "--min-persistence-ratios"),
+            base_config=_build_base_config(args),
+            workers=args.workers,
+            temporal_workers=args.temporal_workers,
+            allow_variable_frame_count=args.allow_variable_frame_count,
+            expected_frame_count=args.expected_frame_count,
+            skip_existing=not args.overwrite,
+            write_debug_images=not args.no_debug_images,
+            write_video=args.write_video,
+            video_fps=args.video_fps,
+            video_format=args.video_format,
+        )
+    except (FileNotFoundError, NotADirectoryError, TemporalLoadError, ValueError, OSError) as exc:
+        print(f"Parameter sweep failed: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Frame variants: {len(result.frame_variants)}")
+    print(f"Temporal variants: {len(result.temporal_variants)}")
+    print(f"Frame results root: {result.frame_results_root}")
+    print(f"Temporal results root: {result.temporal_results_root}")
+    print(f"Frame failures: {result.frame_summary.failed}")
+    print(f"Temporal failed jobs: {result.temporal_summary.failed_jobs}")
+    print(f"Summary: {result.summary_json}")
+    return 0 if result.frame_summary.failed == 0 and result.temporal_summary.failed_jobs == 0 else 1
+
+
+def _build_base_config(args: argparse.Namespace) -> PipelineConfig:
+    return PipelineConfig(
+        mask_threshold=args.mask_threshold,
+        min_component_area=args.min_component_area,
+        remove_border_artifacts=args.remove_border_artifacts,
+        border_margin_px=args.border_margin_px,
+        border_artifact_max_height=args.border_artifact_max_height,
+        border_artifact_min_width_ratio=args.border_artifact_min_width_ratio,
+        radius_search_range=args.radius_search_range,
+        radius_vessel_threshold=args.radius_vessel_threshold,
+        segmentation_distance_threshold=args.segmentation_distance_threshold,
+        final_point_distance_threshold=args.final_point_distance_threshold,
+        branch_point_exclusion_distance=args.branch_point_exclusion_distance,
+    )
+
+
+def _parse_float_list(raw_value: str | None, option_name: str) -> list[float] | None:
+    return _parse_list(raw_value, option_name, float)
+
+
+def _parse_int_list(raw_value: str | None, option_name: str) -> list[int] | None:
+    return _parse_list(raw_value, option_name, int)
+
+
+def _parse_list(raw_value: str | None, option_name: str, parser) -> list | None:
+    if raw_value is None:
+        return None
+
+    values = []
+    for item in raw_value.split(","):
+        clean_item = item.strip()
+        if not clean_item:
+            continue
+        try:
+            values.append(parser(clean_item))
+        except ValueError as exc:
+            raise ValueError(f"{option_name} must contain comma-separated values.") from exc
+    if not values:
+        raise ValueError(f"{option_name} must contain at least one value.")
+    return values
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

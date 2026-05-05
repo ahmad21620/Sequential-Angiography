@@ -13,7 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from stenosis_detection.pipeline import PipelineConfig, _filter_stenosis_points_near_branch_points, _load_mask_image
+from stenosis_detection.pipeline import (
+    PipelineConfig,
+    _filter_stenosis_points_near_branch_points,
+    _load_mask_image,
+    run_stenosis_detection_variants,
+)
 
 
 class PipelineMaskLoadingTests(unittest.TestCase):
@@ -175,6 +180,42 @@ class PipelineMaskLoadingTests(unittest.TestCase):
 
         np.testing.assert_array_equal(filtered_points_xy, stenosis_points_xy)
         np.testing.assert_array_equal(filtered_degrees, stenosis_degrees)
+
+    def test_detection_variants_can_vary_radius_and_threshold_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "p1_v1_00001.png"
+            mask_path = root / "p1_v1_00001_mask.png"
+            image = np.zeros((16, 16), dtype=np.uint8)
+            mask = np.zeros((16, 16), dtype=np.uint8)
+            cv2.line(mask, (2, 8), (13, 8), color=255, thickness=1)
+            self.assertTrue(cv2.imwrite(str(image_path), image))
+            self.assertTrue(cv2.imwrite(str(mask_path), mask))
+
+            configs = [
+                PipelineConfig(
+                    resize_height=16,
+                    resize_width=16,
+                    remove_border_artifacts=False,
+                    radius_outside_fraction_threshold=0.05,
+                    radius_min_outside_samples=2,
+                    stenosis_threshold=0.25,
+                    average_radius_threshold=4.0,
+                ),
+                PipelineConfig(
+                    resize_height=16,
+                    resize_width=16,
+                    remove_border_artifacts=False,
+                    radius_outside_fraction_threshold=0.10,
+                    radius_min_outside_samples=3,
+                    stenosis_threshold=0.35,
+                    average_radius_threshold=5.0,
+                ),
+            ]
+
+            results = run_stenosis_detection_variants(image_path, mask_path, configs)
+
+        self.assertEqual([result.config for result in results], configs)
 
     def _load_temp_mask(self, mask: np.ndarray, config: PipelineConfig) -> tuple[np.ndarray, np.ndarray]:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -60,6 +60,33 @@ Mask files:
 
 The folder hierarchy under the image root and mask root should match.
 
+## Frame + Temporal Parameter Sweeps
+
+To run frame-level and temporal-fusion hyperparameter tests in one optimized
+workflow:
+
+```bash
+python ../scripts/run_stenosis_temporal_sweep.py \
+  --images-root ../work/cadica_keyframes \
+  --masks-root ../work/cadica_vessel_masks \
+  --output-root ../work/cadica_sweep \
+  --workers 0 \
+  --temporal-workers 0 \
+  --no-debug-images \
+  --allow-variable-frame-count \
+  --stenosis-thresholds 0.25,0.35 \
+  --average-radius-thresholds 4.0,5.0 \
+  --radius-outside-fraction-thresholds 0.05,0.10 \
+  --radius-min-outside-samples-values 2,3 \
+  --min-supporting-frames-values 2,3 \
+  --min-persistence-ratios 0.25,0.50
+```
+
+Frame outputs are grouped under `frame_results/<frame_variant>/...`; temporal
+outputs are grouped under
+`temporal_results/<frame_variant>/<temporal_variant>/...`. Existing outputs are
+skipped by default; pass `--overwrite` to force a rerun.
+
 ### Mirrored Outputs
 
 If an input image is located at:

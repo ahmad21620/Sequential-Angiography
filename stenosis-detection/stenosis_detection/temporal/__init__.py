@@ -1,9 +1,11 @@
 from .fusion import (
     DEFAULT_MIN_PERSISTENCE_RATIO,
     DEFAULT_MIN_SUPPORTING_FRAMES,
+    TemporalFusionConfig,
     build_persistent_lesions,
     run_temporal_fusion,
     run_temporal_fusion_on_view_sequence,
+    run_temporal_fusion_variants_on_view_sequence,
     save_view_level_result,
     select_final_view_lesion,
 )
@@ -47,6 +49,7 @@ __all__ = [
     "LesionTrack",
     "ReferenceFrameSelection",
     "TemporalLoadError",
+    "TemporalFusionConfig",
     "ViewSequence",
     "ViewLevelResult",
     "build_persistent_lesions",
@@ -66,6 +69,7 @@ __all__ = [
     "register_frame_to_reference",
     "run_temporal_fusion",
     "run_temporal_fusion_on_view_sequence",
+    "run_temporal_fusion_variants_on_view_sequence",
     "save_view_level_result",
     "save_view_demo_video",
     "save_view_visualization_outputs",

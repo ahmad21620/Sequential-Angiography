@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from .loader import load_frame_results, sort_frame_results
 from .mapping import map_observations_to_reference_centerline
-from .models import FrameLevelResult, LesionTrack, PersistentLesion, ViewLevelResult, ViewSequence
+from .models import (
+    FrameLevelResult,
+    FrameRegistration,
+    LesionTrack,
+    PersistentLesion,
+    ReferenceFrameSelection,
+    ViewLevelResult,
+    ViewSequence,
+)
 from .reference import select_reference_frame
 from .registration import build_frame_registrations
 from .tracking import build_lesion_tracks
@@ -18,6 +27,21 @@ DEFAULT_MIN_PERSISTENCE_RATIO = 0.25
 FINAL_LESION_SELECTION_RULE = (
     "highest_median_degree_then_highest_max_degree_then_highest_persistence_ratio_then_lowest_track_id"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalFusionConfig:
+    min_supporting_frames: int = DEFAULT_MIN_SUPPORTING_FRAMES
+    min_persistence_ratio: float = DEFAULT_MIN_PERSISTENCE_RATIO
+
+
+@dataclass(frozen=True, slots=True)
+class _TemporalFusionBase:
+    view_id: str
+    frame_results: list[FrameLevelResult]
+    reference_selection: ReferenceFrameSelection
+    registrations: list[FrameRegistration]
+    tracks: list[LesionTrack]
 
 
 def run_temporal_fusion(
@@ -47,11 +71,57 @@ def run_temporal_fusion_on_view_sequence(
     min_supporting_frames: int = DEFAULT_MIN_SUPPORTING_FRAMES,
     min_persistence_ratio: float = DEFAULT_MIN_PERSISTENCE_RATIO,
 ) -> ViewLevelResult:
-    _validate_persistence_thresholds(
-        min_supporting_frames=min_supporting_frames,
-        min_persistence_ratio=min_persistence_ratio,
-    )
+    return run_temporal_fusion_variants_on_view_sequence(
+        view_sequence,
+        [
+            TemporalFusionConfig(
+                min_supporting_frames=min_supporting_frames,
+                min_persistence_ratio=min_persistence_ratio,
+            )
+        ],
+    )[0]
 
+
+def run_temporal_fusion_variants_on_view_sequence(
+    view_sequence: ViewSequence,
+    configs: list[TemporalFusionConfig],
+) -> list[ViewLevelResult]:
+    if not configs:
+        raise ValueError("At least one temporal fusion config is required.")
+    for config in configs:
+        _validate_persistence_thresholds(
+            min_supporting_frames=config.min_supporting_frames,
+            min_persistence_ratio=config.min_persistence_ratio,
+        )
+
+    fusion_base = _build_temporal_fusion_base(view_sequence)
+    results: list[ViewLevelResult] = []
+    for config in configs:
+        persistent_lesions = build_persistent_lesions(
+            fusion_base.tracks,
+            total_frame_count=len(fusion_base.frame_results),
+            min_supporting_frames=config.min_supporting_frames,
+            min_persistence_ratio=config.min_persistence_ratio,
+        )
+        final_lesion = select_final_view_lesion(persistent_lesions)
+        results.append(
+            ViewLevelResult(
+                view_id=fusion_base.view_id,
+                frames=fusion_base.frame_results,
+                reference_selection=fusion_base.reference_selection,
+                registrations=fusion_base.registrations,
+                tracks=fusion_base.tracks,
+                persistent_lesions=persistent_lesions,
+                final_lesion=final_lesion,
+                min_supporting_frames=config.min_supporting_frames,
+                min_persistence_ratio=config.min_persistence_ratio,
+                final_selection_rule=FINAL_LESION_SELECTION_RULE,
+            )
+        )
+    return results
+
+
+def _build_temporal_fusion_base(view_sequence: ViewSequence) -> _TemporalFusionBase:
     frame_results = sort_frame_results(list(view_sequence.frames))
     if not frame_results:
         raise ValueError("At least one frame-level stenosis result is required for temporal fusion.")
@@ -73,25 +143,12 @@ def run_temporal_fusion_on_view_sequence(
         )
 
     tracks = build_lesion_tracks(mapped_observations)
-    persistent_lesions = build_persistent_lesions(
-        tracks,
-        total_frame_count=len(frame_results),
-        min_supporting_frames=min_supporting_frames,
-        min_persistence_ratio=min_persistence_ratio,
-    )
-    final_lesion = select_final_view_lesion(persistent_lesions)
-
-    return ViewLevelResult(
+    return _TemporalFusionBase(
         view_id=view_id,
-        frames=frame_results,
+        frame_results=frame_results,
         reference_selection=reference_selection,
         registrations=registrations,
         tracks=tracks,
-        persistent_lesions=persistent_lesions,
-        final_lesion=final_lesion,
-        min_supporting_frames=min_supporting_frames,
-        min_persistence_ratio=min_persistence_ratio,
-        final_selection_rule=FINAL_LESION_SELECTION_RULE,
     )
 
 

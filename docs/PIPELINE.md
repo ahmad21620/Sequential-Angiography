@@ -294,6 +294,44 @@ python scripts/run_temporal_fusion.py ^
   --output work/stenosis_temporal_results/case_001/view_01/view_temporal_fusion.json
 ```
 
+## Frame And Temporal Parameter Sweeps
+
+After keyframe extraction and vessel segmentation, you can run an optimized
+frame-level plus temporal-fusion parameter sweep from the repository root:
+
+```bash
+python scripts/run_stenosis_temporal_sweep.py \
+  --images-root work/cadica_keyframes \
+  --masks-root work/cadica_vessel_masks \
+  --output-root work/cadica_sweep \
+  --workers 0 \
+  --temporal-workers 0 \
+  --no-debug-images \
+  --allow-variable-frame-count \
+  --stenosis-thresholds 0.25,0.35 \
+  --average-radius-thresholds 4.0,5.0 \
+  --radius-outside-fraction-thresholds 0.05,0.10 \
+  --radius-min-outside-samples-values 2,3 \
+  --min-supporting-frames-values 2,3 \
+  --min-persistence-ratios 0.25,0.50
+```
+
+The runner writes:
+
+```text
+work/cadica_sweep/
+  frame_results/<frame_variant>/pX/vY/*_stenosis_results.json
+  temporal_results/<frame_variant>/<temporal_variant>/pX/vY/view_temporal_fusion.json
+  parameter_sweep_summary.json
+```
+
+Frame variants share the expensive image/mask loading, skeletonization,
+segmentation-point detection, and shortest-path work. Temporal variants share
+view loading, registration, mapping, and lesion tracking. Frame and temporal
+stages are CPU-bound; `--workers 0` and `--temporal-workers 0` use all CPU
+cores for their respective stages. GPU acceleration is used earlier by vessel
+segmentation when `--device cuda` is selected.
+
 ## Multi-View Fusion
 
 Multi-view fusion combines temporal fusion outputs for a case using view

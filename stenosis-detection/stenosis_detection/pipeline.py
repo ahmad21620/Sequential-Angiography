@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,12 @@ class StenosisDetectionResult:
         ]
 
 
+@dataclass(slots=True)
+class _PathSegment:
+    shortest_path_rc: np.ndarray
+    shortest_path_length: int
+
+
 def run_stenosis_detection(
     image_path: str | Path,
     mask_path: str | Path,
@@ -159,54 +166,60 @@ def run_stenosis_detection_variants(
         segmentation_points_xy,
         base_config.segmentation_distance_threshold,
     )
+    path_segments = _build_path_segments(skeleton_mask, filtered_segmentation_points_xy)
 
-    raw_stenosis_points_rc: list[tuple[int, int]] = []
-    raw_stenosis_degrees: list[float] = []
-    raw_average_radii: list[float] = []
+    results: list[StenosisDetectionResult | None] = [None] * len(configs)
+    grouped_config_indexes: dict[tuple[float, int], list[int]] = defaultdict(list)
+    for config_index, variant_config in enumerate(configs):
+        grouped_config_indexes[
+            (
+                float(variant_config.radius_outside_fraction_threshold),
+                int(variant_config.radius_min_outside_samples),
+            )
+        ].append(config_index)
 
-    for index in range(len(filtered_segmentation_points_xy) - 1):
-        start_point = filtered_segmentation_points_xy[index]
-        end_point = filtered_segmentation_points_xy[index + 1]
-
-        try:
-            shortest_path_rc, shortest_path_length = findpath2(skeleton_mask, start_point, end_point)
-        except PathNotFoundError:
-            continue
-
-        average_radius = _average_path_radius(shortest_path_rc, shortest_path_length, point_data)
-        queue_rc = collect_queue(shortest_path_rc, point_data)
-        middle_points_rc, stenosis_degrees = _detect_stenosis_candidates_from_queue(
-            queue_rc,
-            average_radius,
-            point_data,
+    for config_indexes in grouped_config_indexes.values():
+        radius_config = configs[config_indexes[0]]
+        if (
+            radius_config.radius_outside_fraction_threshold == base_config.radius_outside_fraction_threshold
+            and radius_config.radius_min_outside_samples == base_config.radius_min_outside_samples
+        ):
+            radius_point_data = point_data
+        else:
+            radius_point_data = build_point_data(
+                skeleton_points_rc,
+                mask_gray,
+                radius_config.radius_search_range,
+                vessel_threshold=radius_config.radius_vessel_threshold,
+                outside_fraction_threshold=radius_config.radius_outside_fraction_threshold,
+                min_outside_samples=radius_config.radius_min_outside_samples,
+            )
+        raw_stenosis_points_rc, raw_stenosis_degrees, raw_average_radii = _collect_raw_stenosis_candidates(
+            path_segments,
+            radius_point_data,
         )
 
-        raw_stenosis_points_rc.extend((int(point[0]), int(point[1])) for point in middle_points_rc)
-        raw_stenosis_degrees.extend(float(value) for value in stenosis_degrees)
-        raw_average_radii.extend(float(average_radius) for _ in range(len(middle_points_rc)))
+        for config_index in config_indexes:
+            variant_config = configs[config_index]
+            stenosis_points_rc, stenosis_degrees = _filter_stenosis_candidates(
+                raw_stenosis_points_rc,
+                raw_stenosis_degrees,
+                raw_average_radii,
+                variant_config,
+            )
+            stenosis_points_xy, stenosis_degrees = _finalize_stenosis_points(
+                stenosis_points_rc,
+                stenosis_degrees,
+                variant_config.final_point_distance_threshold,
+            )
+            stenosis_points_xy, stenosis_degrees = _filter_stenosis_points_near_branch_points(
+                stenosis_points_xy,
+                stenosis_degrees,
+                segmentation_points_xy,
+                variant_config.branch_point_exclusion_distance,
+            )
 
-    results: list[StenosisDetectionResult] = []
-    for variant_config in configs:
-        stenosis_points_rc, stenosis_degrees = _filter_stenosis_candidates(
-            raw_stenosis_points_rc,
-            raw_stenosis_degrees,
-            raw_average_radii,
-            variant_config,
-        )
-        stenosis_points_xy, stenosis_degrees = _finalize_stenosis_points(
-            stenosis_points_rc,
-            stenosis_degrees,
-            variant_config.final_point_distance_threshold,
-        )
-        stenosis_points_xy, stenosis_degrees = _filter_stenosis_points_near_branch_points(
-            stenosis_points_xy,
-            stenosis_degrees,
-            segmentation_points_xy,
-            variant_config.branch_point_exclusion_distance,
-        )
-
-        results.append(
-            StenosisDetectionResult(
+            results[config_index] = StenosisDetectionResult(
                 image_path=resolved_image_path,
                 mask_path=resolved_mask_path,
                 config=variant_config,
@@ -217,15 +230,70 @@ def run_stenosis_detection_variants(
                 skeleton_mask=skeleton_mask,
                 skeleton_points_rc=skeleton_points_rc,
                 skeleton_points_xy=skeleton_points_xy,
-                point_data=point_data,
+                point_data=radius_point_data,
                 segmentation_points_xy=segmentation_points_xy,
                 filtered_segmentation_points_xy=filtered_segmentation_points_xy,
                 stenosis_points_xy=stenosis_points_xy,
                 stenosis_degrees=stenosis_degrees,
             )
+
+    completed_results: list[StenosisDetectionResult] = []
+    for result in results:
+        if result is None:
+            raise RuntimeError("Internal error while building stenosis detection variants.")
+        completed_results.append(result)
+    return completed_results
+
+
+def _build_path_segments(
+    skeleton_mask: np.ndarray,
+    filtered_segmentation_points_xy: np.ndarray,
+) -> list[_PathSegment]:
+    path_segments: list[_PathSegment] = []
+    for index in range(len(filtered_segmentation_points_xy) - 1):
+        start_point = filtered_segmentation_points_xy[index]
+        end_point = filtered_segmentation_points_xy[index + 1]
+
+        try:
+            shortest_path_rc, shortest_path_length = findpath2(skeleton_mask, start_point, end_point)
+        except PathNotFoundError:
+            continue
+
+        path_segments.append(
+            _PathSegment(
+                shortest_path_rc=shortest_path_rc,
+                shortest_path_length=shortest_path_length,
+            )
+        )
+    return path_segments
+
+
+def _collect_raw_stenosis_candidates(
+    path_segments: list[_PathSegment],
+    point_data: dict[tuple[int, int], float],
+) -> tuple[list[tuple[int, int]], list[float], list[float]]:
+    raw_stenosis_points_rc: list[tuple[int, int]] = []
+    raw_stenosis_degrees: list[float] = []
+    raw_average_radii: list[float] = []
+
+    for path_segment in path_segments:
+        average_radius = _average_path_radius(
+            path_segment.shortest_path_rc,
+            path_segment.shortest_path_length,
+            point_data,
+        )
+        queue_rc = collect_queue(path_segment.shortest_path_rc, point_data)
+        middle_points_rc, stenosis_degrees = _detect_stenosis_candidates_from_queue(
+            queue_rc,
+            average_radius,
+            point_data,
         )
 
-    return results
+        raw_stenosis_points_rc.extend((int(point[0]), int(point[1])) for point in middle_points_rc)
+        raw_stenosis_degrees.extend(float(value) for value in stenosis_degrees)
+        raw_average_radii.extend(float(average_radius) for _ in range(len(middle_points_rc)))
+
+    return raw_stenosis_points_rc, raw_stenosis_degrees, raw_average_radii
 
 
 def _load_original_image(image_path: Path, config: PipelineConfig) -> np.ndarray:
@@ -248,18 +316,24 @@ def _load_original_image(image_path: Path, config: PipelineConfig) -> np.ndarray
 
 
 def _validate_variant_configs(configs: list[PipelineConfig]) -> None:
+    variant_fields = {
+        "radius_outside_fraction_threshold",
+        "radius_min_outside_samples",
+        "stenosis_threshold",
+        "average_radius_threshold",
+    }
     base_config = asdict(configs[0])
-    base_config.pop("stenosis_threshold")
-    base_config.pop("average_radius_threshold")
+    for field_name in variant_fields:
+        base_config.pop(field_name)
 
     for config in configs[1:]:
         compare_config = asdict(config)
-        compare_config.pop("stenosis_threshold")
-        compare_config.pop("average_radius_threshold")
+        for field_name in variant_fields:
+            compare_config.pop(field_name)
         if compare_config != base_config:
             raise ValueError(
-                "Stenosis detection variants may only differ by stenosis_threshold "
-                "and average_radius_threshold."
+                "Stenosis detection variants may only differ by radius_outside_fraction_threshold, "
+                "radius_min_outside_samples, stenosis_threshold, and average_radius_threshold."
             )
 
 
