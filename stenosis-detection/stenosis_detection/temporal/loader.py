@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 import json
+from pathlib import Path, PureWindowsPath
 import re
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -56,9 +56,10 @@ def load_frame_result(result_path: str | Path) -> FrameLevelResult:
     if frame_index is None:
         frame_index = _extract_frame_index(image_stem)
 
-    if image_path is not None and image_name != Path(image_path).name:
+    image_path_name = None if image_path is None else _path_filename(image_path)
+    if image_path_name is not None and image_name != image_path_name:
         raise TemporalLoadError(
-            f"{context}: frame.image_name='{image_name}' does not match the image_path filename '{Path(image_path).name}'."
+            f"{context}: frame.image_name='{image_name}' does not match the image_path filename '{image_path_name}'."
         )
 
     skeleton_points_xy = _load_required_points_xy(payload, "skeleton_points", context=context)
@@ -210,6 +211,15 @@ def _coerce_optional_string(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _path_filename(path: str | Path) -> str:
+    raw_path = str(path)
+    posix_name = Path(raw_path).name
+    windows_name = PureWindowsPath(raw_path).name
+    if "\\" in raw_path and windows_name:
+        return windows_name
+    return posix_name
 
 
 def _extract_frame_index(image_stem: str) -> int | None:

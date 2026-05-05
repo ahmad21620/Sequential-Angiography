@@ -5,6 +5,9 @@ against external EHR weak labels. The benchmark tools read JSON outputs that
 already exist on disk. They do not rerun frame detection, temporal fusion, or
 multi-view fusion, and they do not modify pipeline JSON schemas.
 
+For supervised CADICA benchmarking against CADICA frame annotations, use the
+separate workflow in [CADICA_BENCHMARKING.md](CADICA_BENCHMARKING.md).
+
 ## EHR Weak Label Format
 
 Weak labels are loaded from a JSONL file with one JSON object per case:

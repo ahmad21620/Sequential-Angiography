@@ -120,7 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-frame-count",
         type=int,
         default=DEFAULT_VIEW_FRAME_COUNT,
-        help="Expected number of frame-level results for the selected view.",
+        help=(
+            "Expected number of frame-level results for each view in fixed-count mode. "
+            "This is useful for normal extracted keyframes with a consistent frame count."
+        ),
+    )
+    parser.add_argument(
+        "--allow-variable-frame-count",
+        action="store_true",
+        help=(
+            "Allow each view to have its own frame-result count instead of checking --expected-frame-count. "
+            "This is useful for datasets like CADICA with variable-length videos."
+        ),
     )
     parser.add_argument(
         "--min-supporting-frames",
@@ -177,7 +188,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.expected_frame_count < 1:
+    if not args.allow_variable_frame_count and args.expected_frame_count < 1:
         parser.error("--expected-frame-count must be at least 1.")
     if args.min_supporting_frames < 1:
         parser.error("--min-supporting-frames must be at least 1.")
@@ -190,9 +201,11 @@ def main() -> int:
 
     try:
         result_source = _resolve_result_source(args)
+        expected_frame_count = None if args.allow_variable_frame_count else args.expected_frame_count
+        should_filter_frame_count_mismatches = args.skip_frame_count_mismatches and expected_frame_count is not None
         if args.view_id is not None:
             frame_count_skips: list[FrameCountSkip] = []
-            if args.skip_frame_count_mismatches:
+            if should_filter_frame_count_mismatches:
                 view_sequence = load_view_sequence(
                     result_source,
                     expected_frame_count=None,
@@ -210,7 +223,7 @@ def main() -> int:
             else:
                 view_sequence = load_view_sequence(
                     result_source,
-                    expected_frame_count=args.expected_frame_count,
+                    expected_frame_count=expected_frame_count,
                     view_id=args.view_id,
                 )
             output_path = _resolve_single_output_path(args, view_sequence, result_source=result_source)
@@ -220,7 +233,7 @@ def main() -> int:
                 video_format=args.video_format,
             ):
                 print(f"Skipped view '{view_sequence.view_id}' because all expected outputs already exist: {output_path}")
-                if args.skip_frame_count_mismatches:
+                if should_filter_frame_count_mismatches:
                     _print_frame_count_skip_summary(frame_count_skips)
                 return 0
             _run_single_view(
@@ -232,31 +245,31 @@ def main() -> int:
                 video_fps=args.video_fps,
                 video_format=args.video_format,
             )
-            if args.skip_frame_count_mismatches:
+            if should_filter_frame_count_mismatches:
                 _print_frame_count_skip_summary(frame_count_skips)
             return 0
 
         frame_count_skips = []
-        if args.skip_frame_count_mismatches:
+        if should_filter_frame_count_mismatches:
             discovered_view_sequences = load_view_sequences(
                 result_source,
                 expected_frame_count=None,
             )
             view_sequences, frame_count_skips = _filter_view_sequences_by_expected_frame_count(
                 discovered_view_sequences,
-                expected_frame_count=args.expected_frame_count,
+                expected_frame_count=expected_frame_count,
             )
         else:
             view_sequences = load_view_sequences(
                 result_source,
-                expected_frame_count=args.expected_frame_count,
+                expected_frame_count=expected_frame_count,
             )
 
         if not view_sequences:
             print("Processed 0 views.")
             if args.skip_existing:
                 print("Skipped 0 views with complete existing outputs.")
-            if args.skip_frame_count_mismatches:
+            if should_filter_frame_count_mismatches:
                 _print_frame_count_skip_summary(frame_count_skips)
             return 0
 
@@ -279,7 +292,7 @@ def main() -> int:
                 video_fps=args.video_fps,
                 video_format=args.video_format,
             )
-            if args.skip_frame_count_mismatches:
+            if should_filter_frame_count_mismatches:
                 _print_frame_count_skip_summary(frame_count_skips)
             return 0
 
@@ -303,7 +316,7 @@ def main() -> int:
         print(f"Processed {processed} views.")
         if args.skip_existing:
             print(f"Skipped {skipped} views with complete existing outputs.")
-        if args.skip_frame_count_mismatches:
+        if should_filter_frame_count_mismatches:
             _print_frame_count_skip_summary(frame_count_skips)
         return 0
     except (FileNotFoundError, NotADirectoryError, TemporalLoadError, ValueError) as exc:

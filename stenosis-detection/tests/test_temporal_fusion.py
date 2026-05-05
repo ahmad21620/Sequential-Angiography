@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stdout
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 import run_temporal_fusion as temporal_cli
 
 from stenosis_detection.temporal.fusion import build_persistent_lesions
-from stenosis_detection.temporal.loader import load_view_sequence
+from stenosis_detection.temporal.loader import _path_filename, load_frame_result, load_view_sequence
 from stenosis_detection.temporal.mapping import map_observations_to_reference_centerline
 from stenosis_detection.temporal.models import (
     FrameLevelResult,
@@ -46,6 +47,13 @@ class TemporalFusionTests(unittest.TestCase):
         self.assertEqual(view_sequence.frames[0].height, 800)
         self.assertEqual(view_sequence.frames[0].observation_count, 1)
         self.assertAlmostEqual(view_sequence.frames[1].observations[0].degree, 0.6)
+
+    def test_loader_accepts_windows_style_image_path_filename(self) -> None:
+        fixture_dir = Path(__file__).resolve().parent / "data" / "view_sequence"
+        frame_result = load_frame_result(fixture_dir / "slice_0001_stenosis_results.json")
+
+        self.assertEqual(_path_filename(r"Input_Original\slice_0001.png"), "slice_0001.png")
+        self.assertEqual(frame_result.image_name, "slice_0001.png")
 
     def test_reference_frame_selection_prefers_largest_support_then_middle_frame(self) -> None:
         frame_results = [
@@ -343,6 +351,70 @@ class TemporalFusionTests(unittest.TestCase):
         self.assertIn("Skipped 1 view with frame-count mismatches (expected 2 frame results).", output)
         self.assertIn("  1 frame results: 1 view", output)
 
+    def test_cli_allow_variable_frame_count_accepts_mixed_length_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            results_root = temp_root / "results"
+            output_root = temp_root / "temporal"
+            for frame_index in range(1, 3):
+                self._write_frame_result_json(results_root / "p1" / "v1", "p1/v1", frame_index)
+            for frame_index in range(1, 6):
+                self._write_frame_result_json(results_root / "p1" / "v2", "p1/v2", frame_index)
+
+            argv = [
+                "run_temporal_fusion.py",
+                "--results-root",
+                str(results_root),
+                "--output-root",
+                str(output_root),
+                "--allow-variable-frame-count",
+            ]
+            stdout = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(temporal_cli, "_run_batch_views", return_value=(2, 0)) as run_batch_views,
+                redirect_stdout(stdout),
+            ):
+                exit_code = temporal_cli.main()
+
+        self.assertEqual(exit_code, 0)
+        run_batch_views.assert_called_once()
+        view_sequences = run_batch_views.call_args.args[0]
+        self.assertEqual([(view.view_id, view.frame_count) for view in view_sequences], [("p1/v1", 2), ("p1/v2", 5)])
+        self.assertIn("Processed 2 views.", stdout.getvalue())
+
+    def test_cli_fixed_frame_count_mode_rejects_mixed_length_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            results_root = temp_root / "results"
+            output_root = temp_root / "temporal"
+            for frame_index in range(1, 3):
+                self._write_frame_result_json(results_root / "p1" / "v1", "p1/v1", frame_index)
+            for frame_index in range(1, 6):
+                self._write_frame_result_json(results_root / "p1" / "v2", "p1/v2", frame_index)
+
+            argv = [
+                "run_temporal_fusion.py",
+                "--results-root",
+                str(results_root),
+                "--output-root",
+                str(output_root),
+                "--expected-frame-count",
+                "2",
+            ]
+            stdout = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(temporal_cli, "_run_batch_views") as run_batch_views,
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                redirect_stdout(stdout),
+            ):
+                exit_code = temporal_cli.main()
+
+        self.assertEqual(exit_code, 1)
+        run_batch_views.assert_not_called()
+        self.assertIn("View 'p1/v2' has 5 frame results; expected 2.", stderr.getvalue())
+
     def test_cli_passes_workers_to_batch_runner(self) -> None:
         first_view = self._make_view_sequence(view_id="study/series_a")
         second_view = self._make_view_sequence(view_id="study/series_b")
@@ -548,6 +620,30 @@ class TemporalFusionTests(unittest.TestCase):
         first_frame.result_path = Path("Output/study/series_a/slice_0001_stenosis_results.json")
         second_frame.result_path = Path("Output/study/series_a/slice_0002_stenosis_results.json")
         return temporal_cli.ViewSequence(view_id=view_id, frames=[first_frame, second_frame])
+
+    def _write_frame_result_json(self, output_dir: Path, view_id: str, frame_index: int) -> None:
+        image_name = f"slice_{frame_index:04d}.png"
+        image_stem = image_name.removesuffix(".png")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "image_path": f"Input_Original\\{image_name}",
+            "mask_path": f"Input_Mask\\{image_stem}_mask.png",
+            "frame": {
+                "image_name": image_name,
+                "image_stem": image_stem,
+                "view_id": view_id,
+                "frame_index": frame_index,
+                "width": 600,
+                "height": 800,
+            },
+            "skeleton_points": [[1, 1], [2, 1], [3, 1]],
+            "stenosis_points": [],
+            "counts": {
+                "skeleton_points": 3,
+                "stenosis_points": 0,
+            },
+        }
+        (output_dir / f"{image_stem}_stenosis_results.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 if __name__ == "__main__":

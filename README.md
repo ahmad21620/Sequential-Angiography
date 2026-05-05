@@ -162,6 +162,9 @@ predictions against case-level EHR weak labels without rerunning inference.
 See `docs/BENCHMARKING.md` for label format, interpretation notes, output
 files, threshold sweeps, and example commands.
 
+For supervised CADICA evaluation against CADICA frame annotations, see
+[docs/CADICA_BENCHMARKING.md](docs/CADICA_BENCHMARKING.md).
+
 ## Tests And Smoke Checks
 
 From the repository root:
