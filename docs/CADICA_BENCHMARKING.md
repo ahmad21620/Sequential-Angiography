@@ -24,6 +24,25 @@ Intentionally not used in the first implementation:
 - `CADICAprojections.json`, unless a later implementation uses it for real
   multi-view angles.
 
+## CADICA Keyframe Extraction
+
+To run the keyframe extractor directly on CADICA while preserving the original
+non-CADICA behavior, opt into CADICA mode:
+
+```bash
+python scripts/run_keyframes.py \
+  --input-root data/CADICA \
+  --cadica-selected-frame-counts \
+  --output-root work/cadica_keyframes \
+  --overwrite
+```
+
+This reads `data/CADICA/selectedVideos/pX/vY/input/*.png`, writes
+`work/cadica_keyframes/pX/vY/*.png`, and uses each video's
+`pX_vY_selectedFrames.txt` count as that video's extraction limit. If you omit
+`--cadica-selected-frame-counts`, the normal fixed `--limit` extraction path is
+used.
+
 ## 1. Prepare CADICA
 
 This converts CADICA into the mirrored image tree expected by the pipeline and

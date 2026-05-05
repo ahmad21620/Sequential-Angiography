@@ -16,6 +16,7 @@ from angio_keyframes.backends import (
     compute_contrast_fill_score,
     create_backend,
 )
+from angio_keyframes.cadica import read_cadica_selected_frame_count, resolve_cadica_selected_videos_root
 from angio_keyframes.discovery import discover_frame_directories
 from angio_keyframes.images import list_image_files, load_grayscale_image, write_grayscale_image
 from angio_keyframes.models import ExtractionResult, KeyframeCandidate
@@ -195,6 +196,7 @@ def extract_keyframes_from_root(
     frames_dirname: str = "frames",
     overwrite: bool = False,
     skip_existing: bool = False,
+    cadica_selected_frame_counts: bool = False,
 ) -> list[ExtractionResult]:
     if workers <= 0:
         raise ValueError("workers must be greater than 0.")
@@ -205,25 +207,37 @@ def extract_keyframes_from_root(
     if backend != "cpu" and workers != 1:
         raise ValueError("workers > 1 is only supported with the cpu backend.")
 
-    frame_directories = discover_frame_directories(input_path, frames_dirname)
-    if not frame_directories:
-        raise ValueError(f"No supported image directories were found under: {input_path}")
+    effective_frames_dirname = "input" if cadica_selected_frame_counts and frames_dirname == "frames" else frames_dirname
+    discovery_input_path = (
+        resolve_cadica_selected_videos_root(input_path)
+        if cadica_selected_frame_counts
+        else input_path
+    )
 
-    input_is_image_folder = bool(list_image_files(input_path))
+    frame_directories = discover_frame_directories(discovery_input_path, effective_frames_dirname)
+    if not frame_directories:
+        raise ValueError(f"No supported image directories were found under: {discovery_input_path}")
+
+    input_is_image_folder = bool(list_image_files(discovery_input_path))
     resolved_output_root = resolve_output_root(input_path, output_root)
-    copy_patient_metadata_files(input_path, resolved_output_root, input_is_image_folder)
+    copy_patient_metadata_files(discovery_input_path, resolved_output_root, input_is_image_folder)
     jobs: list[ExtractionJob] = [
         (
             backend,
             frames_dir,
             resolve_sequence_output_dir(
                 frames_dir=frames_dir,
-                input_path=input_path,
+                input_path=discovery_input_path,
                 output_root=resolved_output_root,
                 input_is_image_folder=input_is_image_folder,
-                frames_dirname=frames_dirname,
+                frames_dirname=effective_frames_dirname,
             ),
-            limit,
+            _resolve_sequence_limit(
+                frames_dir=frames_dir,
+                default_limit=limit,
+                frames_dirname=effective_frames_dirname,
+                cadica_selected_frame_counts=cadica_selected_frame_counts,
+            ),
             baseline_frames,
             smoothing_window,
             overwrite,
@@ -326,3 +340,15 @@ def extract_keyframes_from_directory(
         smoothing_window=smoothing_window,
         overwrite=overwrite,
     )
+
+
+def _resolve_sequence_limit(
+    *,
+    frames_dir: Path,
+    default_limit: int,
+    frames_dirname: str,
+    cadica_selected_frame_counts: bool,
+) -> int:
+    if not cadica_selected_frame_counts:
+        return default_limit
+    return read_cadica_selected_frame_count(frames_dir, frames_dirname)

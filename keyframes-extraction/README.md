@@ -82,6 +82,22 @@ CUDA example:
 angio-keyframes data/raw_cases --backend cuda --output-root work/keyframes_cuda --overwrite
 ```
 
+CADICA example, run from the repository root:
+
+```bash
+python scripts/run_keyframes.py \
+  --input-root data/CADICA \
+  --cadica-selected-frame-counts \
+  --output-root work/cadica_keyframes \
+  --overwrite
+```
+
+With `--cadica-selected-frame-counts`, a CADICA root is resolved to
+`selectedVideos/`, frame directories default to CADICA `input/` folders, outputs
+are written as `pX/vY/*.png`, and each video keeps the same number of frames as
+its `pX_vY_selectedFrames.txt` reference. Without that flag, the original fixed
+`--limit` extraction behavior is unchanged.
+
 Useful flags:
 
 - `--limit 8`: keep a different number of keyframes.
@@ -89,8 +105,10 @@ Useful flags:
 - `--smoothing-window 7`: use a larger odd centered moving-average window for score smoothing.
 - `--backend cuda`: run the heavy image-processing path on a CUDA-capable OpenCV build.
 - `--workers 4`: process up to 4 discovered frame directories in parallel.
+- `--input-root data/CADICA`: named alias for the input path, useful in scripted runs.
 - `--output-root extracted_keyframes`: write keyframes into a mirrored tree rooted at `extracted_keyframes`.
 - `--frames-dirname frames`: change the directory name used for discovery.
+- `--cadica-selected-frame-counts`: opt into CADICA `selectedVideos/pX/vY/input` discovery and per-video selected-frame counts.
 - `--overwrite`: replace an existing output directory.
 - `--skip-existing`: skip sequences whose output directory already exists.
 

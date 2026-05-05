@@ -406,6 +406,50 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((expected_output_dir / ".extract_complete.png").exists())
             self.assertEqual(len(list(expected_output_dir.iterdir())), 3)
 
+    def test_extract_keyframes_from_cadica_root_uses_selected_frame_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cadica_root = Path(temp_dir) / "CADICA"
+            output_root = Path(temp_dir) / "cadica_keyframes"
+            video_inputs = [
+                (cadica_root / "selectedVideos" / "p1" / "v1" / "input", 2),
+                (cadica_root / "selectedVideos" / "p1" / "v2" / "input", 3),
+            ]
+
+            for video_input, selected_count in video_inputs:
+                video_input.mkdir(parents=True)
+                patient_id = video_input.parent.parent.name
+                video_id = video_input.parent.name
+                selected_names = []
+                for frame_index in range(5):
+                    image = np.full((16, 16, 3), 180, dtype=np.uint8)
+                    if frame_index >= 2:
+                        cv2.line(image, (2, 8), (13, 8), color=(40, 40, 40), thickness=frame_index)
+                    image_name = f"{patient_id}_{video_id}_{frame_index:05d}.png"
+                    cv2.imwrite(str(video_input / image_name), image)
+                    if len(selected_names) < selected_count:
+                        selected_names.append(image_name)
+                selected_frames_path = video_input.parent / f"{patient_id}_{video_id}_selectedFrames.txt"
+                selected_frames_path.write_text("\n".join(selected_names), encoding="utf-8")
+
+            results = extract_keyframes_from_root(
+                input_path=cadica_root,
+                output_root=output_root,
+                baseline_frames=1,
+                smoothing_window=1,
+                overwrite=True,
+                cadica_selected_frame_counts=True,
+            )
+
+            output_counts = {
+                result.output_dir.relative_to(output_root).as_posix(): result.selected_count
+                for result in results
+            }
+
+            self.assertEqual(output_counts, {"p1/v1": 2, "p1/v2": 3})
+            self.assertFalse((output_root / "selectedVideos").exists())
+            self.assertEqual(len(list((output_root / "p1" / "v1").glob("*.png"))), 2)
+            self.assertEqual(len(list((output_root / "p1" / "v2").glob("*.png"))), 3)
+
     def test_extract_keyframes_from_root_copies_patient_metadata_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             dataset_root = Path(temp_dir) / "dataset"
