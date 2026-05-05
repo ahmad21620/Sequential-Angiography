@@ -49,6 +49,12 @@ class CadicaPreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             cadica_root = self._write_tiny_cadica_tree(temp_root / "CADICA")
+            self._write_cadica_projections(
+                cadica_root,
+                videos_lca=["p1_v1"],
+                videos_lca2=[],
+                videos_rca=[],
+            )
             output_root = temp_root / "prepared"
 
             outputs = prepare_cadica_for_pipeline(
@@ -94,10 +100,51 @@ class CadicaPreparationTests(unittest.TestCase):
 
             views = json.loads((output_root / "keyframes" / "p1" / "views.json").read_text(encoding="utf-8"))
             self.assertTrue(views["metadata"]["projection_angles_placeholder"])
+            self.assertIn("categorical projection groups", views["metadata"]["note"])
             self.assertEqual(
                 views["views"][0]["temporal_fusion_json"],
                 "../../stenosis_temporal_results/p1/v1/view_temporal_fusion.json",
             )
+            views_by_id = {view["view_id"]: view for view in views["views"]}
+            self.assertEqual(views_by_id["v1"]["rao_lao"], 0.0)
+            self.assertEqual(views_by_id["v1"]["cra_cau"], 0.0)
+            self.assertEqual(views_by_id["v1"]["angle_status"], "missing")
+            self.assertEqual(views_by_id["v1"]["projection_group"], "LCA")
+            self.assertEqual(views_by_id["v1"]["projection_groups"], ["LCA"])
+            self.assertEqual(views_by_id["v1"]["coronary_side"], "left")
+            self.assertEqual(views_by_id["v1"]["projection_status"], "known")
+            self.assertTrue(views_by_id["v1"]["placeholder_projection_angles"])
+            self.assertEqual(views_by_id["v2"]["projection_group"], "unknown")
+            self.assertEqual(views_by_id["v2"]["projection_groups"], [])
+            self.assertEqual(views_by_id["v2"]["coronary_side"], "unknown")
+            self.assertEqual(views_by_id["v2"]["projection_status"], "missing")
+
+    def test_prepare_cadica_marks_duplicated_projection_group_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            cadica_root = self._write_tiny_cadica_tree(temp_root / "CADICA")
+            self._write_cadica_projections(
+                cadica_root,
+                videos_lca=["p1_v1"],
+                videos_lca2=["p1_v1"],
+                videos_rca=[],
+            )
+            output_root = temp_root / "prepared"
+
+            prepare_cadica_for_pipeline(
+                cadica_root,
+                output_root,
+                frame_scope="all_selected_videos",
+                negative_frame_scope="selected",
+                copy_mode="copy",
+            )
+
+            views = json.loads((output_root / "keyframes" / "p1" / "views.json").read_text(encoding="utf-8"))
+            views_by_id = {view["view_id"]: view for view in views["views"]}
+            self.assertEqual(views_by_id["v1"]["projection_group"], "unknown")
+            self.assertEqual(views_by_id["v1"]["projection_groups"], ["LCA", "LCA2"])
+            self.assertEqual(views_by_id["v1"]["coronary_side"], "left")
+            self.assertEqual(views_by_id["v1"]["projection_status"], "ambiguous")
 
     def _write_tiny_cadica_tree(self, cadica_root: Path) -> Path:
         patient_dir = cadica_root / "selectedVideos" / "p1"
@@ -119,6 +166,24 @@ class CadicaPreparationTests(unittest.TestCase):
 
         (lesion_video / "groundtruth" / "p1_v1_00001.txt").write_text("10;20;30;40;stenosis\n", encoding="utf-8")
         return cadica_root
+
+    def _write_cadica_projections(
+        self,
+        cadica_root: Path,
+        *,
+        videos_lca: list[str],
+        videos_lca2: list[str],
+        videos_rca: list[str],
+    ) -> None:
+        payload = {
+            "videosLCA": videos_lca,
+            "videosLCA2": videos_lca2,
+            "videosRCA": videos_rca,
+        }
+        (cadica_root / "selectedVideos" / "CADICAprojections.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
 
     def _read_csv(self, path: Path) -> list[dict[str, str]]:
         with path.open("r", encoding="utf-8", newline="") as handle:

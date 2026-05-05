@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .fusion import compute_angle_distance, compute_diversity_weight
+from .fusion import compute_angle_distance, compute_view_diversity_weight
 from .models import MultiViewCaseResult, MultiViewPerViewSummary, MultiViewViewInput
 
 
@@ -81,12 +81,17 @@ def create_multiview_summary_visualization(case_result: MultiViewCaseResult) -> 
     _draw_header(canvas, case_result, evidence_rows)
     _draw_angle_map(canvas, case_result, evidence_rows, (MARGIN, 176, 700, 480))
     _draw_conclusion_panel(canvas, case_result, evidence_rows, (MARGIN + 700 + PANEL_GAP, 176, 812, 480))
-    _draw_view_table(canvas, evidence_rows, (MARGIN, 684, CANVAS_WIDTH - (2 * MARGIN), height - 716))
+    _draw_view_table(
+        canvas,
+        evidence_rows,
+        (MARGIN, 684, CANVAS_WIDTH - (2 * MARGIN), height - 716),
+        uses_projection_metadata=_uses_projection_view_metadata(case_result),
+    )
     return canvas
 
 
 def create_multiview_support_matrix_visualization(case_result: MultiViewCaseResult) -> np.ndarray:
-    """Build a pairwise angle-distance/diversity-weight matrix for the available views."""
+    """Build a pairwise view-diversity-weight matrix for the available views."""
     views = case_result.views
     view_count = max(1, len(views))
     cell_size = max(44, min(86, 920 // view_count))
@@ -95,11 +100,22 @@ def create_multiview_support_matrix_visualization(case_result: MultiViewCaseResu
     width = max(980, left_margin + (view_count * cell_size) + 90)
     height = top_margin + (view_count * cell_size) + 150
     canvas = np.full((height, width, 3), PANEL_COLOR, dtype=np.uint8)
+    uses_projection_metadata = _uses_projection_view_metadata(case_result)
 
-    _put_text(canvas, "Multi-View Angle Support Matrix", (34, 48), 0.9, TEXT_COLOR, 2)
+    matrix_title = (
+        "Multi-View Projection Support Matrix"
+        if uses_projection_metadata
+        else "Multi-View Angle Support Matrix"
+    )
+    matrix_description = (
+        "Cells show the projection-group multiplier used when one view supports another. Opposite-side or unknown groups provide no support."
+        if uses_projection_metadata
+        else "Cells show the angle-diversity multiplier used when one view supports another. Similar views carry less support; distinct views carry stronger support."
+    )
+    _put_text(canvas, matrix_title, (34, 48), 0.9, TEXT_COLOR, 2)
     _draw_wrapped_text(
         canvas,
-        "Cells show the angle-diversity multiplier used when one view supports another. Similar views carry less support; distinct views carry stronger support.",
+        matrix_description,
         34,
         82,
         width - 68,
@@ -125,9 +141,10 @@ def create_multiview_support_matrix_visualization(case_result: MultiViewCaseResu
                 color = (218, 224, 232)
                 label = "-"
             else:
-                angle_distance = compute_angle_distance(row_view, column_view)
-                weight = compute_diversity_weight(
-                    angle_distance,
+                weight = compute_view_diversity_weight(
+                    row_view,
+                    column_view,
+                    config.view_diversity_mode,
                     duplicate_distance_degrees=config.duplicate_view_angle_distance_degrees,
                     distinct_distance_degrees=config.distinct_view_angle_distance_degrees,
                 )
@@ -147,13 +164,21 @@ def create_multiview_support_matrix_visualization(case_result: MultiViewCaseResu
             )
 
     legend_y = height - 64
-    _draw_matrix_legend(canvas, 34, legend_y, config.duplicate_view_angle_distance_degrees, config.distinct_view_angle_distance_degrees)
+    _draw_matrix_legend(
+        canvas,
+        34,
+        legend_y,
+        uses_projection_metadata,
+        config.duplicate_view_angle_distance_degrees,
+        config.distinct_view_angle_distance_degrees,
+    )
     return canvas
 
 
 def _build_view_evidence(case_result: MultiViewCaseResult) -> list[_ViewEvidence]:
     final_lesion = case_result.final_case_lesion
     config = case_result.fusion_metadata.config
+    uses_projection_metadata = _uses_projection_view_metadata(case_result)
     raw_support_by_view_id: dict[str, float] = {}
     distance_by_view_id: dict[str, float] = {}
     weight_by_view_id: dict[str, float] = {}
@@ -169,8 +194,10 @@ def _build_view_evidence(case_result: MultiViewCaseResult) -> list[_ViewEvidence
                     continue
 
                 angle_distance = compute_angle_distance(primary_view, summary.view_input)
-                diversity_weight = compute_diversity_weight(
-                    angle_distance,
+                diversity_weight = compute_view_diversity_weight(
+                    primary_view,
+                    summary.view_input,
+                    config.view_diversity_mode,
                     duplicate_distance_degrees=config.duplicate_view_angle_distance_degrees,
                     distinct_distance_degrees=config.distinct_view_angle_distance_degrees,
                 )
@@ -213,7 +240,7 @@ def _build_view_evidence(case_result: MultiViewCaseResult) -> list[_ViewEvidence
             _ViewEvidence(
                 summary=summary,
                 role=role,
-                role_label=_role_label(role),
+                role_label=_role_label(role, uses_projection_metadata),
                 candidate_score=candidate_score,
                 contribution=contribution,
                 angle_distance_to_primary=distance_by_view_id.get(view_id),
@@ -229,9 +256,14 @@ def _draw_header(canvas: np.ndarray, case_result: MultiViewCaseResult, evidence_
     cv2.rectangle(canvas, (x, y), (x + width, y + height), PANEL_DARK_COLOR, thickness=-1)
     _put_text(canvas, "Multi-View Fusion", (x + 26, y + 42), 1.05, WHITE_COLOR, 2)
     _put_text(canvas, f"Case: {case_result.case_id}", (x + 26, y + 78), 0.58, (218, 228, 238), 1)
+    support_text = (
+        "CADICA projection groups provide categorical cross-view support."
+        if _uses_projection_view_metadata(case_result)
+        else "Views with distinct angles provide stronger support; similar-angle views provide weaker support."
+    )
     _put_text(
         canvas,
-        "Views with distinct angles provide stronger support; similar-angle views provide weaker support.",
+        support_text,
         (x + 26, y + 106),
         0.47,
         (190, 202, 216),
@@ -270,8 +302,12 @@ def _draw_angle_map(
 ) -> None:
     x, y, width, height = rect
     _draw_panel(canvas, rect)
-    _put_text(canvas, "View-Angle Map", (x + 24, y + 38), 0.72, TEXT_COLOR, 2)
-    _put_text(canvas, "x = RAO(-) / LAO(+), y = CAU(-) / CRA(+)", (x + 24, y + 66), 0.44, MUTED_TEXT_COLOR, 1)
+    if _uses_projection_view_metadata(case_result):
+        _put_text(canvas, "Projection Group Map", (x + 24, y + 38), 0.72, TEXT_COLOR, 2)
+        _put_text(canvas, "Numeric angles are placeholders; support follows CADICA projection groups.", (x + 24, y + 66), 0.44, MUTED_TEXT_COLOR, 1)
+    else:
+        _put_text(canvas, "View-Angle Map", (x + 24, y + 38), 0.72, TEXT_COLOR, 2)
+        _put_text(canvas, "x = RAO(-) / LAO(+), y = CAU(-) / CRA(+)", (x + 24, y + 66), 0.44, MUTED_TEXT_COLOR, 1)
 
     plot_x = x + 78
     plot_y = y + 88
@@ -364,7 +400,8 @@ def _draw_conclusion_panel(
 
     distinct_count = sum(1 for row in evidence_rows if row.role == "distinct_support")
     similar_count = sum(1 for row in evidence_rows if row.role == "similar_support")
-    summary = f"Distinct support views: {distinct_count}   Similar-angle support views: {similar_count}"
+    similar_label = "Compatible projection support views" if _uses_projection_view_metadata(case_result) else "Similar-angle support views"
+    summary = f"Distinct support views: {distinct_count}   {similar_label}: {similar_count}"
     _put_text(canvas, summary, (x + 24, y + height - 30), 0.46, MUTED_TEXT_COLOR, 1)
 
 
@@ -372,6 +409,8 @@ def _draw_view_table(
     canvas: np.ndarray,
     evidence_rows: list[_ViewEvidence],
     rect: tuple[int, int, int, int],
+    *,
+    uses_projection_metadata: bool,
 ) -> None:
     x, y, width, height = rect
     _draw_panel(canvas, rect)
@@ -398,7 +437,7 @@ def _draw_view_table(
     }
     for label, column_x in [
         ("View", columns["view"]),
-        ("Angle", columns["angle"]),
+        ("Projection" if uses_projection_metadata else "Angle", columns["angle"]),
         ("Candidate", columns["candidate"]),
         ("Score", columns["score"]),
         ("Weight", columns["weight"]),
@@ -420,7 +459,14 @@ def _draw_view_table(
         _draw_thumbnail(canvas, row.summary, columns["thumbnail"], row_y + 12, 116, 70)
         _put_text(canvas, _truncate_text(row.summary.view_input.view_id, 130, 0.5, 1), (columns["view"], row_y + 34), 0.5, TEXT_COLOR, 1)
         _put_text(canvas, _truncate_text(row.summary.view_input.sequence_id, 130, 0.42, 1), (columns["view"], row_y + 60), 0.42, MUTED_TEXT_COLOR, 1)
-        _put_text(canvas, _format_angle(row.summary.view_input), (columns["angle"], row_y + 40), 0.46, TEXT_COLOR, 1)
+        _put_text(
+            canvas,
+            _format_view_metadata(row.summary.view_input, uses_projection_metadata),
+            (columns["angle"], row_y + 40),
+            0.46,
+            TEXT_COLOR,
+            1,
+        )
         _put_text(canvas, _format_candidate(row), (columns["candidate"], row_y + 40), 0.46, TEXT_COLOR, 1)
         _put_text(canvas, _format_optional_score(row.candidate_score), (columns["score"], row_y + 40), 0.46, TEXT_COLOR, 1)
         _put_text(canvas, _format_optional_score(row.diversity_weight), (columns["weight"], row_y + 40), 0.46, TEXT_COLOR, 1)
@@ -514,14 +560,22 @@ def _draw_matrix_legend(
     canvas: np.ndarray,
     x: int,
     y: int,
+    uses_projection_metadata: bool,
     duplicate_threshold: float,
     distinct_threshold: float,
 ) -> None:
-    items = [
-        (f"similar <= {duplicate_threshold:g} deg", _weight_color(0.25)),
-        ("partial", _weight_color(0.6)),
-        (f"distinct >= {distinct_threshold:g} deg", _weight_color(1.0)),
-    ]
+    if uses_projection_metadata:
+        items = [
+            ("no support", _weight_color(0.0)),
+            ("same group", _weight_color(0.25)),
+            ("LCA vs LCA2", _weight_color(0.65)),
+        ]
+    else:
+        items = [
+            (f"similar <= {duplicate_threshold:g} deg", _weight_color(0.25)),
+            ("partial", _weight_color(0.6)),
+            (f"distinct >= {distinct_threshold:g} deg", _weight_color(1.0)),
+        ]
     current_x = x
     for label, color in items:
         cv2.rectangle(canvas, (current_x, y - 16), (current_x + 28, y + 4), color, thickness=-1)
@@ -593,7 +647,15 @@ def _draw_panel(canvas: np.ndarray, rect: tuple[int, int, int, int]) -> None:
     cv2.rectangle(canvas, (x, y), (x + width, y + height), (43, 49, 58), thickness=1)
 
 
-def _role_label(role: str) -> str:
+def _role_label(role: str, uses_projection_metadata: bool) -> str:
+    if uses_projection_metadata:
+        return {
+            "primary": "primary lesion",
+            "distinct_support": "distinct projection support",
+            "similar_support": "compatible projection support",
+            "candidate": "candidate only",
+            "none": "no lesion candidate",
+        }.get(role, role)
     return {
         "primary": "primary lesion",
         "distinct_support": "distinct-angle support",
@@ -614,6 +676,8 @@ def _role_color(role: str) -> tuple[int, int, int]:
 
 
 def _weight_color(weight: float) -> tuple[int, int, int]:
+    if weight <= 0.0:
+        return (218, 224, 232)
     clamped = max(0.25, min(1.0, float(weight)))
     normalized = (clamped - 0.25) / 0.75
     low = np.asarray(SIMILAR_COLOR, dtype=np.float64)
@@ -672,6 +736,35 @@ def _format_angle(view: MultiViewViewInput) -> str:
     horizontal_label = "LAO" if view.rao_lao >= 0.0 else "RAO"
     vertical_label = "CRA" if view.cra_cau >= 0.0 else "CAU"
     return f"{horizontal_label} {abs(view.rao_lao):.1f} / {vertical_label} {abs(view.cra_cau):.1f}"
+
+
+def _format_view_metadata(view: MultiViewViewInput, uses_projection_metadata: bool) -> str:
+    if not uses_projection_metadata:
+        return _format_angle(view)
+    group = view.projection_group or "unknown"
+    side = view.coronary_side or "unknown"
+    if view.projection_status == "ambiguous" and view.projection_groups:
+        group = "+".join(view.projection_groups)
+    return f"{group} / {side}"
+
+
+def _uses_projection_view_metadata(case_result: MultiViewCaseResult) -> bool:
+    mode = case_result.fusion_metadata.config.view_diversity_mode
+    if mode == "projection_group":
+        return True
+    if mode == "auto":
+        return any(_view_has_projection_metadata(view) for view in case_result.views)
+    return False
+
+
+def _view_has_projection_metadata(view: MultiViewViewInput) -> bool:
+    return (
+        view.projection_group is not None
+        or view.projection_groups is not None
+        or view.coronary_side is not None
+        or view.projection_status is not None
+        or view.angle_status is not None
+    )
 
 
 def _format_candidate(row: _ViewEvidence) -> str:

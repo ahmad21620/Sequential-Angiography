@@ -15,6 +15,16 @@ if str(REPO_ROOT) not in sys.path:
 import run_multiview_fusion as multiview_cli
 
 from stenosis_detection.multiview import (
+    LesionCandidateScore,
+    LoadedMultiViewCase,
+    LoadedMultiViewView,
+    MultiViewFusionConfig,
+    MultiViewPerViewSummary,
+    MultiViewViewInput,
+    ViewLevelLesionCandidate,
+    compute_distinct_view_support_score,
+    compute_projection_group_diversity_weight,
+    is_projection_group_distinct_support,
     load_multiview_case,
     load_multiview_case_input,
     run_multiview_fusion,
@@ -36,10 +46,43 @@ class MultiViewFusionTests(unittest.TestCase):
         self.assertEqual(view_input.sequence_id, "seq_01")
         self.assertAlmostEqual(view_input.rao_lao, 30.0)
         self.assertAlmostEqual(view_input.cra_cau, -10.0)
+        self.assertIsNone(view_input.projection_group)
         self.assertEqual(
             view_input.temporal_fusion_json_path,
             (fixture_dir / "outputs" / "case_single_view" / "view_01_temporal_fusion.json").resolve(),
         )
+
+    def test_loader_reads_optional_projection_group_metadata(self) -> None:
+        case_payload = {
+            "case_id": "case_projection",
+            "views": [
+                {
+                    "view_id": "view_01",
+                    "sequence_id": "seq_01",
+                    "rao_lao": 0.0,
+                    "cra_cau": 0.0,
+                    "angle_status": "missing",
+                    "projection_group": "LCA",
+                    "projection_groups": ["LCA"],
+                    "coronary_side": "left",
+                    "projection_status": "known",
+                    "temporal_fusion_json": "view_temporal_fusion.json",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_input_path = Path(temp_dir) / "views.json"
+            case_input_path.write_text(json.dumps(case_payload), encoding="utf-8")
+
+            case_input = load_multiview_case_input(case_input_path)
+
+            view_input = case_input.views[0]
+            self.assertEqual(view_input.angle_status, "missing")
+            self.assertEqual(view_input.projection_group, "LCA")
+            self.assertEqual(view_input.projection_groups, ["LCA"])
+            self.assertEqual(view_input.coronary_side, "left")
+            self.assertEqual(view_input.projection_status, "known")
 
     def test_case_root_resolution_uses_views_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,6 +263,95 @@ class MultiViewFusionTests(unittest.TestCase):
         self.assertEqual(final_case_lesion.distinct_supporting_view_ids, [])
         self.assertLess(final_case_lesion.distinct_view_support_score, 0.04)
 
+    def test_projection_group_fusion_same_group_uses_duplicate_weight(self) -> None:
+        primary_view = self._projection_view("view_01", "LCA", "left")
+        support_view = self._projection_view("view_02", "LCA", "left")
+
+        score, supporting_view_ids, distinct_supporting_view_ids = compute_distinct_view_support_score(
+            primary_view,
+            [self._support_summary(support_view, candidate_score=0.8)],
+            support_score_scale=1.0,
+            max_support_score=1.0,
+            view_diversity_mode="projection_group",
+        )
+
+        self.assertAlmostEqual(compute_projection_group_diversity_weight(primary_view, support_view), 0.25)
+        self.assertAlmostEqual(score, 0.20)
+        self.assertEqual(supporting_view_ids, ["view_02"])
+        self.assertEqual(distinct_supporting_view_ids, [])
+
+    def test_projection_group_fusion_lca_vs_lca2_uses_left_compatible_weight(self) -> None:
+        primary_view = self._projection_view("view_01", "LCA", "left")
+        support_view = self._projection_view("view_02", "LCA2", "left")
+
+        self.assertAlmostEqual(compute_projection_group_diversity_weight(primary_view, support_view), 0.65)
+        self.assertTrue(is_projection_group_distinct_support(primary_view, support_view))
+
+    def test_projection_group_fusion_lca_vs_rca_has_no_support(self) -> None:
+        primary_view = self._projection_view("view_01", "LCA", "left")
+        support_view = self._projection_view("view_02", "RCA", "right")
+
+        score, supporting_view_ids, distinct_supporting_view_ids = compute_distinct_view_support_score(
+            primary_view,
+            [self._support_summary(support_view, candidate_score=0.8)],
+            support_score_scale=1.0,
+            max_support_score=1.0,
+            view_diversity_mode="projection_group",
+        )
+
+        self.assertEqual(compute_projection_group_diversity_weight(primary_view, support_view), 0.0)
+        self.assertEqual(score, 0.0)
+        self.assertEqual(supporting_view_ids, [])
+        self.assertEqual(distinct_supporting_view_ids, [])
+
+    def test_projection_group_fusion_ambiguous_left_group_is_compatible_not_distinct(self) -> None:
+        primary_view = self._projection_view("view_01", "LCA", "left")
+        ambiguous_view = self._projection_view(
+            "view_02",
+            "unknown",
+            "left",
+            projection_groups=["LCA", "LCA2"],
+            projection_status="ambiguous",
+        )
+
+        self.assertAlmostEqual(compute_projection_group_diversity_weight(primary_view, ambiguous_view), 0.65)
+        self.assertFalse(is_projection_group_distinct_support(primary_view, ambiguous_view))
+
+    def test_split_by_coronary_side_writes_side_results_and_excludes_unknown_views(self) -> None:
+        loaded_case = LoadedMultiViewCase(
+            case_id="case_projection",
+            views=[
+                self._loaded_projection_view("left_01", "LCA", "left"),
+                self._loaded_projection_view("left_02", "LCA2", "left"),
+                self._loaded_projection_view("right_01", "RCA", "right"),
+                self._loaded_projection_view(
+                    "unknown_01",
+                    "unknown",
+                    "unknown",
+                    projection_groups=[],
+                    projection_status="missing",
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "case_multiview_fusion.json"
+            payload = multiview_cli._run_split_case(
+                loaded_case,
+                output_path,
+                MultiViewFusionConfig(view_diversity_mode="projection_group"),
+            )
+
+            self.assertTrue(output_path.is_file())
+            self.assertEqual(payload["case_id"], "case_projection")
+            self.assertEqual(sorted(payload["side_results"]), ["left", "right"])
+            self.assertEqual(len(payload["unknown_views"]), 1)
+            left_result = payload["side_results"]["left"]
+            right_result = payload["side_results"]["right"]
+            self.assertEqual([view["view_id"] for view in left_result["views"]], ["left_01", "left_02"])
+            self.assertEqual([view["view_id"] for view in right_result["views"]], ["right_01"])
+            self.assertNotIn("right_01", left_result["supporting_views"])
+
     def test_case_with_no_persistent_lesions_returns_clean_no_final_lesion_result(self) -> None:
         case_result = run_multiview_fusion(self._load_case("no_persistent_case"))
 
@@ -282,6 +414,86 @@ class MultiViewFusionTests(unittest.TestCase):
 
     def _fixture_dir(self, case_name: str) -> Path:
         return Path(__file__).resolve().parent / "data" / "multiview" / case_name
+
+    def _projection_view(
+        self,
+        view_id: str,
+        projection_group: str,
+        coronary_side: str,
+        *,
+        projection_groups: list[str] | None = None,
+        projection_status: str = "known",
+    ) -> MultiViewViewInput:
+        groups = projection_groups
+        if groups is None:
+            groups = [] if projection_group == "unknown" else [projection_group]
+        return MultiViewViewInput(
+            view_id=view_id,
+            sequence_id=view_id,
+            rao_lao=0.0,
+            cra_cau=0.0,
+            temporal_fusion_json_path=Path(f"{view_id}.json"),
+            angle_status="missing",
+            projection_group=projection_group,
+            projection_groups=groups,
+            coronary_side=coronary_side,
+            projection_status=projection_status,
+        )
+
+    def _support_summary(
+        self,
+        view_input: MultiViewViewInput,
+        *,
+        candidate_score: float,
+    ) -> MultiViewPerViewSummary:
+        candidate = self._candidate()
+        return MultiViewPerViewSummary(
+            view_input=view_input,
+            candidate_source="final_lesion",
+            candidate_count=1,
+            best_candidate=candidate,
+            best_candidate_score=LesionCandidateScore(
+                base_score=candidate_score,
+                stability_adjustment=0.0,
+                candidate_score=candidate_score,
+            ),
+        )
+
+    def _loaded_projection_view(
+        self,
+        view_id: str,
+        projection_group: str,
+        coronary_side: str,
+        *,
+        projection_groups: list[str] | None = None,
+        projection_status: str = "known",
+    ) -> LoadedMultiViewView:
+        return LoadedMultiViewView(
+            view_input=self._projection_view(
+                view_id,
+                projection_group,
+                coronary_side,
+                projection_groups=projection_groups,
+                projection_status=projection_status,
+            ),
+            final_lesion=self._candidate(),
+            persistent_lesions=[],
+        )
+
+    def _candidate(self) -> ViewLevelLesionCandidate:
+        return ViewLevelLesionCandidate(
+            lesion_id=1,
+            track_id=1,
+            severity="moderate",
+            supporting_frame_count=2,
+            total_frame_count=3,
+            persistence_ratio=0.67,
+            frame_indices=[1, 2],
+            median_degree=0.70,
+            max_degree=0.80,
+            degree_std=0.05,
+            max_frame_gap=1,
+        )
 
 
 if __name__ == "__main__":

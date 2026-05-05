@@ -12,15 +12,31 @@ class MultiViewViewInput:
     rao_lao: float
     cra_cau: float
     temporal_fusion_json_path: Path
+    angle_status: str | None = None
+    projection_group: str | None = None
+    projection_groups: list[str] | None = None
+    coronary_side: str | None = None
+    projection_status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "view_id": self.view_id,
             "sequence_id": self.sequence_id,
             "rao_lao": float(self.rao_lao),
             "cra_cau": float(self.cra_cau),
             "temporal_fusion_json": str(self.temporal_fusion_json_path),
         }
+        if self.angle_status is not None:
+            payload["angle_status"] = self.angle_status
+        if self.projection_group is not None:
+            payload["projection_group"] = self.projection_group
+        if self.projection_groups is not None:
+            payload["projection_groups"] = list(self.projection_groups)
+        if self.coronary_side is not None:
+            payload["coronary_side"] = self.coronary_side
+        if self.projection_status is not None:
+            payload["projection_status"] = self.projection_status
+        return payload
 
 
 @dataclass(slots=True)
@@ -162,9 +178,11 @@ class MultiViewFusionConfig:
     support_score_scale: float = 0.20
     medium_confidence_threshold: float = 0.45
     high_confidence_threshold: float = 0.75
+    view_diversity_mode: str = "angle"
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "view_diversity_mode": self.view_diversity_mode,
             "duplicate_view_angle_distance_degrees": float(self.duplicate_view_angle_distance_degrees),
             "distinct_view_angle_distance_degrees": float(self.distinct_view_angle_distance_degrees),
             "support_score_scale": float(self.support_score_scale),
@@ -198,7 +216,7 @@ class MultiViewPerViewSummary:
     best_candidate_score: LesionCandidateScore | None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "view_id": self.view_input.view_id,
             "sequence_id": self.view_input.sequence_id,
             "rao_lao": float(self.view_input.rao_lao),
@@ -208,6 +226,17 @@ class MultiViewPerViewSummary:
             "best_candidate": None if self.best_candidate is None else self.best_candidate.to_dict(),
             "best_candidate_score": None if self.best_candidate_score is None else self.best_candidate_score.to_dict(),
         }
+        if self.view_input.angle_status is not None:
+            payload["angle_status"] = self.view_input.angle_status
+        if self.view_input.projection_group is not None:
+            payload["projection_group"] = self.view_input.projection_group
+        if self.view_input.projection_groups is not None:
+            payload["projection_groups"] = list(self.view_input.projection_groups)
+        if self.view_input.coronary_side is not None:
+            payload["coronary_side"] = self.view_input.coronary_side
+        if self.view_input.projection_status is not None:
+            payload["projection_status"] = self.view_input.projection_status
+        return payload
 
 
 @dataclass(slots=True)

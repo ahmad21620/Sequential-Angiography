@@ -15,14 +15,20 @@ Used files:
 - `selectedVideos/pX/vY/pX_vY_selectedFrames.txt`: marks clinically selected frames.
 - `selectedVideos/pX/vY/groundtruth/*.txt`: frame-level lesion boxes in `[x, y, w, h]` form.
 - `selectedVideos/pX/vY/input/*.png`: frame images.
+- `selectedVideos/CADICAprojections.json`: categorical projection groups
+  (`videosLCA`, `videosLCA2`, `videosRCA`) for multi-view fusion metadata.
 
 Intentionally not used in the first implementation:
 
 - `nonselectedVideos/` for official metrics.
 - `groundTruthTable.mat`.
 - `metadata.xlsx` for frame-level detection metrics.
-- `CADICAprojections.json`, unless a later implementation uses it for real
-  multi-view angles.
+
+CADICA does not provide numeric RAO/LAO or CRA/CAU angles in
+`CADICAprojections.json`. The preparation step keeps `rao_lao=0.0` and
+`cra_cau=0.0` only as backward-compatible placeholders, marks
+`angle_status="missing"`, and writes the projection group and coronary side as
+categorical metadata.
 
 ## CADICA Keyframe Extraction
 
@@ -125,7 +131,28 @@ python scripts/run_temporal_fusion.py \
 Temporal outputs are optional for the supervised CADICA benchmark when
 `--video-prediction-source frame_any` is used.
 
-## 5. Run CADICA Benchmark
+## 5. Run Multi-View Fusion
+
+For CADICA, use categorical projection-group diversity rather than geometric
+angle diversity:
+
+```bash
+python scripts/run_multiview_fusion.py \
+  --case-root-tree work/cadica_prepared/keyframes \
+  --temporal-results-root work/cadica_temporal_results \
+  --output-root work/cadica_multiview_results \
+  --view-diversity-mode projection_group \
+  --split-by-coronary-side
+```
+
+`--view-diversity-mode projection_group` uses the CADICA groups as categorical
+view metadata. It does not perform geometric angle-aware fusion on CADICA.
+`--split-by-coronary-side` runs left and right coronary-side fusion separately
+so LCA/LCA2 and RCA views cannot support each other. Views with missing or
+unknown projection metadata are reported in the combined JSON but are not used
+for side-specific fusion by default.
+
+## 6. Run CADICA Benchmark
 
 ```bash
 python scripts/run_cadica_benchmark.py \

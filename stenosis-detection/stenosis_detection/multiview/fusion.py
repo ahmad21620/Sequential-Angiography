@@ -27,6 +27,8 @@ SUPPORT_SCORE_SCALE = 0.20
 MAX_DISTINCT_VIEW_SUPPORT_SCORE = 0.35
 MEDIUM_CONFIDENCE_THRESHOLD = 0.45
 HIGH_CONFIDENCE_THRESHOLD = 0.75
+VIEW_DIVERSITY_MODES = ("angle", "projection_group", "auto")
+LEFT_PROJECTION_GROUPS = frozenset({"LCA", "LCA2"})
 FINAL_CASE_SELECTION_RULE = (
     "highest_total_score_then_more_distinct_support_then_higher_candidate_score_then_higher_median_degree_"
     "then_higher_persistence_ratio_then_view_id_then_lesion_id"
@@ -130,7 +132,9 @@ def compute_distinct_view_support_score(
     support_score_scale: float = SUPPORT_SCORE_SCALE,
     min_supporting_view_score: float = MIN_SUPPORTING_VIEW_SCORE,
     max_support_score: float = MAX_DISTINCT_VIEW_SUPPORT_SCORE,
+    view_diversity_mode: str = "angle",
 ) -> tuple[float, list[str], list[str]]:
+    _validate_view_diversity_mode(view_diversity_mode)
     supporting_view_ids: list[str] = []
     distinct_supporting_view_ids: list[str] = []
     support_score = 0.0
@@ -145,16 +149,22 @@ def compute_distinct_view_support_score(
         if candidate_score < min_supporting_view_score:
             continue
 
-        angle_distance = compute_angle_distance(primary_view, view_summary.view_input)
-        support_score += support_score_scale * candidate_score * compute_diversity_weight(
-            angle_distance,
+        diversity_weight = compute_view_diversity_weight(
+            primary_view,
+            view_summary.view_input,
+            view_diversity_mode,
             duplicate_distance_degrees=duplicate_distance_degrees,
             distinct_distance_degrees=distinct_distance_degrees,
         )
+        if diversity_weight <= 0.0:
+            continue
+
+        support_score += support_score_scale * candidate_score * diversity_weight
         supporting_view_ids.append(view_summary.view_input.view_id)
-        if not is_duplicate_view(
+        if is_distinct_supporting_view(
             primary_view,
             view_summary.view_input,
+            view_diversity_mode,
             duplicate_distance_degrees=duplicate_distance_degrees,
         ):
             distinct_supporting_view_ids.append(view_summary.view_input.view_id)
@@ -181,6 +191,81 @@ def compute_diversity_weight(
     distance_range = distinct_distance_degrees - duplicate_distance_degrees
     normalized_distance = (angle_distance - duplicate_distance_degrees) / distance_range
     return 0.25 + (0.75 * normalized_distance)
+
+
+def compute_view_diversity_weight(
+    first_view: MultiViewViewInput,
+    second_view: MultiViewViewInput,
+    view_diversity_mode: str = "angle",
+    *,
+    duplicate_distance_degrees: float = DUPLICATE_VIEW_ANGLE_DISTANCE_DEGREES,
+    distinct_distance_degrees: float = DISTINCT_VIEW_ANGLE_DISTANCE_DEGREES,
+) -> float:
+    pair_mode = _resolve_pair_view_diversity_mode(first_view, second_view, view_diversity_mode)
+    if pair_mode == "projection_group":
+        return compute_projection_group_diversity_weight(first_view, second_view)
+
+    angle_distance = compute_angle_distance(first_view, second_view)
+    return compute_diversity_weight(
+        angle_distance,
+        duplicate_distance_degrees=duplicate_distance_degrees,
+        distinct_distance_degrees=distinct_distance_degrees,
+    )
+
+
+def is_distinct_supporting_view(
+    first_view: MultiViewViewInput,
+    second_view: MultiViewViewInput,
+    view_diversity_mode: str = "angle",
+    *,
+    duplicate_distance_degrees: float = DUPLICATE_VIEW_ANGLE_DISTANCE_DEGREES,
+) -> bool:
+    pair_mode = _resolve_pair_view_diversity_mode(first_view, second_view, view_diversity_mode)
+    if pair_mode == "projection_group":
+        return is_projection_group_distinct_support(first_view, second_view)
+    return not is_duplicate_view(
+        first_view,
+        second_view,
+        duplicate_distance_degrees=duplicate_distance_degrees,
+    )
+
+
+def compute_projection_group_diversity_weight(
+    first_view: MultiViewViewInput,
+    second_view: MultiViewViewInput,
+) -> float:
+    first_side = _projection_side(first_view)
+    second_side = _projection_side(second_view)
+    if first_side == "unknown" or second_side == "unknown" or first_side != second_side:
+        return 0.0
+
+    first_groups = _projection_group_set(first_view)
+    second_groups = _projection_group_set(second_view)
+    if not first_groups or not second_groups:
+        return 0.0
+
+    if first_groups == second_groups and len(first_groups) == 1:
+        return 0.25
+
+    if first_side == "left" and first_groups <= LEFT_PROJECTION_GROUPS and second_groups <= LEFT_PROJECTION_GROUPS:
+        return 0.65
+
+    return 0.0
+
+
+def is_projection_group_distinct_support(
+    first_view: MultiViewViewInput,
+    second_view: MultiViewViewInput,
+) -> bool:
+    if _projection_side(first_view) != "left" or _projection_side(second_view) != "left":
+        return False
+    first_groups = _projection_group_set(first_view)
+    second_groups = _projection_group_set(second_view)
+    if len(first_groups) != 1 or len(second_groups) != 1:
+        return False
+    if first_view.projection_status != "known" or second_view.projection_status != "known":
+        return False
+    return first_groups != second_groups and first_groups <= LEFT_PROJECTION_GROUPS and second_groups <= LEFT_PROJECTION_GROUPS
 
 
 def score_lesion_candidate(candidate: ViewLevelLesionCandidate) -> LesionCandidateScore:
@@ -250,6 +335,7 @@ def _build_final_case_lesion(
         duplicate_distance_degrees=config.duplicate_view_angle_distance_degrees,
         distinct_distance_degrees=config.distinct_view_angle_distance_degrees,
         support_score_scale=config.support_score_scale,
+        view_diversity_mode=config.view_diversity_mode,
     )
     total_score = candidate_reference.score.candidate_score + distinct_view_support_score
     confidence_score = _clamp_score(total_score)
@@ -291,6 +377,7 @@ def _resolve_fusion_config(config: MultiViewFusionConfig | None) -> MultiViewFus
 
 
 def _validate_fusion_config(config: MultiViewFusionConfig) -> None:
+    _validate_view_diversity_mode(config.view_diversity_mode)
     if config.duplicate_view_angle_distance_degrees <= 0.0:
         raise ValueError("duplicate_view_angle_distance_degrees must be positive.")
     if config.distinct_view_angle_distance_degrees <= config.duplicate_view_angle_distance_degrees:
@@ -303,6 +390,50 @@ def _validate_fusion_config(config: MultiViewFusionConfig) -> None:
         raise ValueError("high_confidence_threshold must be in the range [0.0, 1.0].")
     if config.medium_confidence_threshold > config.high_confidence_threshold:
         raise ValueError("medium_confidence_threshold must be <= high_confidence_threshold.")
+
+
+def _validate_view_diversity_mode(view_diversity_mode: str) -> None:
+    if view_diversity_mode not in VIEW_DIVERSITY_MODES:
+        raise ValueError(f"view_diversity_mode must be one of {VIEW_DIVERSITY_MODES}.")
+
+
+def _resolve_pair_view_diversity_mode(
+    first_view: MultiViewViewInput,
+    second_view: MultiViewViewInput,
+    view_diversity_mode: str,
+) -> str:
+    if view_diversity_mode != "auto":
+        return view_diversity_mode
+    if _has_projection_metadata(first_view) or _has_projection_metadata(second_view):
+        return "projection_group"
+    return "angle"
+
+
+def _has_projection_metadata(view: MultiViewViewInput) -> bool:
+    return (
+        view.angle_status is not None
+        or view.projection_group is not None
+        or view.projection_groups is not None
+        or view.coronary_side is not None
+        or view.projection_status is not None
+    )
+
+
+def _projection_side(view: MultiViewViewInput) -> str:
+    side = (view.coronary_side or "unknown").strip().lower()
+    if side in {"left", "right"}:
+        return side
+    return "unknown"
+
+
+def _projection_group_set(view: MultiViewViewInput) -> frozenset[str]:
+    groups: list[str] = []
+    if view.projection_groups:
+        groups.extend(view.projection_groups)
+    if view.projection_group and view.projection_group != "unknown":
+        groups.append(view.projection_group)
+    normalized_groups = {group.strip().upper() for group in groups if group.strip()}
+    return frozenset(group for group in normalized_groups if group in {"LCA", "LCA2", "RCA"})
 
 
 def _clamp_score(score: float) -> float:
@@ -346,12 +477,17 @@ __all__ = [
     "HIGH_CONFIDENCE_THRESHOLD",
     "MAX_DISTINCT_VIEW_SUPPORT_SCORE",
     "MEDIUM_CONFIDENCE_THRESHOLD",
+    "VIEW_DIVERSITY_MODES",
     "SUPPORT_SCORE_SCALE",
     "build_multiview_view_summaries",
     "compute_angle_distance",
     "compute_diversity_weight",
     "compute_distinct_view_support_score",
+    "compute_projection_group_diversity_weight",
+    "compute_view_diversity_weight",
     "is_duplicate_view",
+    "is_distinct_supporting_view",
+    "is_projection_group_distinct_support",
     "run_multiview_fusion",
     "save_multiview_case_result",
     "score_lesion_candidate",

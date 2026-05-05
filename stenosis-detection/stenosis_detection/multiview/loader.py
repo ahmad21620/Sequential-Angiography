@@ -119,6 +119,11 @@ def _load_view_input(payload: object, *, base_dir: Path, context: str) -> MultiV
         rao_lao=_require_finite_float(payload, "rao_lao", context=context),
         cra_cau=_require_finite_float(payload, "cra_cau", context=context),
         temporal_fusion_json_path=_resolve_temporal_fusion_json_path(base_dir, raw_temporal_fusion_json),
+        angle_status=_load_optional_string(payload, "angle_status", context=context),
+        projection_group=_load_optional_string(payload, "projection_group", context=context),
+        projection_groups=_load_optional_string_list(payload, "projection_groups", context=context),
+        coronary_side=_load_optional_string(payload, "coronary_side", context=context),
+        projection_status=_load_optional_string(payload, "projection_status", context=context),
     )
 
 
@@ -530,6 +535,33 @@ def _load_optional_positive_int(payload: dict[str, Any], field_name: str, *, con
     if value is None:
         return None
     return _coerce_positive_int(value, field_name=field_name, context=context)
+
+
+def _load_optional_string(payload: dict[str, Any], field_name: str, *, context: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MultiViewLoadError(f"{context}: field '{field_name}' must be a string when present.")
+    clean_value = value.strip()
+    return clean_value or None
+
+
+def _load_optional_string_list(payload: dict[str, Any], field_name: str, *, context: str) -> list[str] | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise MultiViewLoadError(f"{context}: field '{field_name}' must be an array when present.")
+
+    strings: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise MultiViewLoadError(f"{context}: field '{field_name}[{index}]' must be a string.")
+        clean_item = item.strip()
+        if clean_item:
+            strings.append(clean_item)
+    return strings
 
 
 def _coerce_float(value: object, *, field_name: str, context: str) -> float:

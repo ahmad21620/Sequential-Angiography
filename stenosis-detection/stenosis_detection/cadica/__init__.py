@@ -7,12 +7,14 @@ from .annotations import (
     read_video_list,
 )
 from .benchmark import CadicaBenchmarkResult, run_cadica_benchmark
-from .prepare import prepare_cadica_for_pipeline
+from .prepare import CadicaProjectionInfo, load_cadica_projection_info, prepare_cadica_for_pipeline
 
 __all__ = [
     "CadicaBox",
     "CadicaBenchmarkResult",
     "CadicaFrame",
+    "CadicaProjectionInfo",
+    "load_cadica_projection_info",
     "load_cadica_annotations",
     "prepare_cadica_for_pipeline",
     "read_groundtruth_boxes",

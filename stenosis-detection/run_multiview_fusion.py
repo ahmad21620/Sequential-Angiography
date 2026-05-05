@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from stenosis_detection import (
     DISTINCT_VIEW_ANGLE_DISTANCE_DEGREES,
     DUPLICATE_VIEW_ANGLE_DISTANCE_DEGREES,
     HIGH_CONFIDENCE_THRESHOLD,
+    LoadedMultiViewCase,
+    LoadedMultiViewView,
     MEDIUM_CONFIDENCE_THRESHOLD,
     SUPPORT_SCORE_SCALE,
     MultiViewCaseResult,
@@ -84,6 +87,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=HIGH_CONFIDENCE_THRESHOLD,
         help="Minimum confidence score labeled as high.",
     )
+    parser.add_argument(
+        "--view-diversity-mode",
+        choices=["angle", "projection_group", "auto"],
+        default="angle",
+        help="Cross-view diversity mode. Use projection_group or auto for CADICA projection groups.",
+    )
+    parser.add_argument(
+        "--split-by-coronary-side",
+        action="store_true",
+        help="Run separate left/right fusions using coronary_side metadata and report unknown-side views.",
+    )
     return parser
 
 
@@ -126,6 +140,7 @@ def main() -> int:
                 Path(args.output_root),
                 config,
                 temporal_results_root=temporal_results_root,
+                split_by_coronary_side=args.split_by_coronary_side,
             )
 
         _run_one_case(
@@ -133,6 +148,7 @@ def main() -> int:
             Path(args.output),
             config,
             temporal_results_root=temporal_results_root,
+            split_by_coronary_side=args.split_by_coronary_side,
         )
         return 0
     except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
@@ -159,6 +175,7 @@ def _build_fusion_config(args: argparse.Namespace) -> MultiViewFusionConfig:
         support_score_scale=args.support_score_scale,
         medium_confidence_threshold=args.medium_confidence_threshold,
         high_confidence_threshold=args.high_confidence_threshold,
+        view_diversity_mode=args.view_diversity_mode,
     )
 
 
@@ -168,6 +185,7 @@ def _run_tree_mode(
     config: MultiViewFusionConfig,
     *,
     temporal_results_root: Path | None = None,
+    split_by_coronary_side: bool = False,
 ) -> int:
     case_inputs = _discover_case_input_paths(case_root_tree)
     processed = 0
@@ -182,6 +200,7 @@ def _run_tree_mode(
                 config,
                 temporal_results_root=temporal_results_root,
                 case_root_tree=case_root_tree,
+                split_by_coronary_side=split_by_coronary_side,
             )
             processed += 1
         except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
@@ -217,13 +236,17 @@ def _run_one_case(
     *,
     temporal_results_root: Path | None = None,
     case_root_tree: Path | None = None,
-) -> MultiViewCaseResult:
+    split_by_coronary_side: bool = False,
+) -> MultiViewCaseResult | dict[str, object]:
     multiview_case = load_multiview_case(
         case_input_path,
         temporal_results_root=temporal_results_root,
         case_root_tree=case_root_tree,
     )
     print(f"Loaded case '{multiview_case.case_id}' with {multiview_case.view_count} views.")
+
+    if split_by_coronary_side:
+        return _run_split_case(multiview_case, output_path, config)
 
     case_result = run_multiview_fusion(multiview_case, config=config)
     _print_fusion_summary(case_result)
@@ -232,6 +255,54 @@ def _run_one_case(
     print(f"Saved case-level result: {saved_path}")
     _save_visualizations(case_result, saved_path)
     return case_result
+
+
+def _run_split_case(
+    multiview_case: LoadedMultiViewCase,
+    output_path: Path,
+    config: MultiViewFusionConfig,
+) -> dict[str, object]:
+    side_groups = _split_views_by_coronary_side(multiview_case)
+    side_results: dict[str, object] = {}
+    skipped_sides: list[str] = []
+
+    for side in ("left", "right"):
+        side_views = side_groups[side]
+        if not side_views:
+            skipped_sides.append(side)
+            continue
+        side_case = LoadedMultiViewCase(
+            case_id=f"{multiview_case.case_id}:{side}",
+            views=side_views,
+        )
+        side_result = run_multiview_fusion(side_case, config=config)
+        side_results[side] = side_result.to_dict()
+        print(f"{side.title()} side: {len(side_views)} views, confidence={side_result.confidence.label}.")
+
+    unknown_views = [view.view_input.to_dict() for view in side_groups["unknown"]]
+    payload: dict[str, object] = {
+        "case_id": multiview_case.case_id,
+        "split_by_coronary_side": True,
+        "view_diversity_mode": config.view_diversity_mode,
+        "side_results": side_results,
+        "unknown_views": unknown_views,
+        "skipped_sides": skipped_sides,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"Unknown-side views reported but not fused: {len(unknown_views)}")
+    print(f"Saved split multi-view result: {output_path}")
+    return payload
+
+
+def _split_views_by_coronary_side(multiview_case: LoadedMultiViewCase) -> dict[str, list[LoadedMultiViewView]]:
+    groups: dict[str, list[LoadedMultiViewView]] = {"left": [], "right": [], "unknown": []}
+    for view in multiview_case.views:
+        side = (view.view_input.coronary_side or "unknown").strip().lower()
+        if side not in {"left", "right"}:
+            side = "unknown"
+        groups[side].append(view)
+    return groups
 
 
 def _save_visualizations(case_result: MultiViewCaseResult, output_path: Path) -> None:

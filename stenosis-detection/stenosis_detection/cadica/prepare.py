@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import csv
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 from typing import Any
@@ -14,6 +16,17 @@ from .annotations import CadicaBox, CadicaFrame, load_cadica_annotations
 
 
 COPY_MODE_CHOICES = {"copy", "symlink", "hardlink"}
+CADICA_PROJECTIONS_FILENAME = "CADICAprojections.json"
+PROJECTION_GROUP_SOURCES = {
+    "videosLCA": ("LCA", "left"),
+    "videosLCA2": ("LCA2", "left"),
+    "videosRCA": ("RCA", "right"),
+}
+PROJECTION_SIDE_BY_GROUP = {
+    projection_group: coronary_side
+    for projection_group, coronary_side in PROJECTION_GROUP_SOURCES.values()
+}
+PROJECTION_VIDEO_KEY_RE = re.compile(r"(p\d+)[_\-/\\\s]+(v\d+)", re.IGNORECASE)
 MANIFEST_FIELDS = [
     "patient_id",
     "video_id",
@@ -29,6 +42,22 @@ MANIFEST_FIELDS = [
     "gt_box_source_paths",
     "gt_boxes_json",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CadicaProjectionInfo:
+    projection_group: str
+    projection_groups: list[str]
+    coronary_side: str
+    projection_status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "projection_group": self.projection_group,
+            "projection_groups": list(self.projection_groups),
+            "coronary_side": self.coronary_side,
+            "projection_status": self.projection_status,
+        }
 
 
 def prepare_cadica_for_pipeline(
@@ -49,6 +78,7 @@ def prepare_cadica_for_pipeline(
         frame_scope=frame_scope,
         negative_frame_scope=negative_frame_scope,
     )
+    projection_info_by_video_key = load_cadica_projection_info(cadica_root)
 
     rows: list[dict[str, Any]] = []
     frames_by_patient_video: dict[tuple[str, str], list[CadicaFrame]] = defaultdict(list)
@@ -65,7 +95,7 @@ def prepare_cadica_for_pipeline(
     resolved_output_root.mkdir(parents=True, exist_ok=True)
     _write_csv(manifest_csv, rows)
     _write_jsonl(manifest_jsonl, rows)
-    _write_patient_files(keyframes_root, frames_by_patient_video)
+    _write_patient_files(keyframes_root, frames_by_patient_video, projection_info_by_video_key)
     _write_summary(
         summary_json,
         frames,
@@ -81,6 +111,36 @@ def prepare_cadica_for_pipeline(
         "manifest_csv": manifest_csv,
         "manifest_jsonl": manifest_jsonl,
         "preparation_summary_json": summary_json,
+    }
+
+
+def load_cadica_projection_info(cadica_root: str | Path) -> dict[str, CadicaProjectionInfo]:
+    projection_path = Path(cadica_root) / "selectedVideos" / CADICA_PROJECTIONS_FILENAME
+    if not projection_path.exists():
+        return {}
+    if not projection_path.is_file():
+        raise ValueError(f"CADICA projections path is not a file: {projection_path}")
+
+    payload = json.loads(projection_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"CADICA projections JSON must contain an object: {projection_path}")
+
+    groups_by_video_key: dict[str, list[str]] = defaultdict(list)
+    for array_name, (projection_group, _coronary_side) in PROJECTION_GROUP_SOURCES.items():
+        raw_videos = payload.get(array_name, [])
+        if raw_videos is None:
+            continue
+        if not isinstance(raw_videos, list):
+            raise ValueError(f"{projection_path}: '{array_name}' must be an array.")
+        for raw_video in raw_videos:
+            video_key = _normalize_projection_video_key(raw_video)
+            if video_key is None:
+                continue
+            groups_by_video_key[video_key].append(projection_group)
+
+    return {
+        video_key: _projection_info_from_groups(projection_groups)
+        for video_key, projection_groups in groups_by_video_key.items()
     }
 
 
@@ -195,7 +255,11 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
-def _write_patient_files(keyframes_root: Path, frames_by_patient_video: dict[tuple[str, str], list[CadicaFrame]]) -> None:
+def _write_patient_files(
+    keyframes_root: Path,
+    frames_by_patient_video: dict[tuple[str, str], list[CadicaFrame]],
+    projection_info_by_video_key: dict[str, CadicaProjectionInfo],
+) -> None:
     videos_by_patient: dict[str, dict[str, list[CadicaFrame]]] = defaultdict(dict)
     for (patient_id, video_id), frames in frames_by_patient_video.items():
         videos_by_patient[patient_id][video_id] = sorted(frames, key=lambda frame: frame.frame_id)
@@ -215,7 +279,11 @@ def _write_patient_files(keyframes_root: Path, frames_by_patient_video: dict[tup
             "metadata": {
                 "source_dataset": "CADICA",
                 "projection_angles_placeholder": True,
-                "note": "Projection angles are placeholders until CADICAprojections.json support is implemented.",
+                "projection_group_source": f"selectedVideos/{CADICA_PROJECTIONS_FILENAME}",
+                "note": (
+                    "CADICAprojections.json provides categorical projection groups, not numeric "
+                    "RAO/LAO or CRA/CAU angles. Numeric angles are kept as 0.0 placeholders."
+                ),
             },
             "views": [
                 {
@@ -223,6 +291,12 @@ def _write_patient_files(keyframes_root: Path, frames_by_patient_video: dict[tup
                     "sequence_id": video["video_id"],
                     "rao_lao": 0.0,
                     "cra_cau": 0.0,
+                    "angle_status": "missing",
+                    **_projection_info_for_video(
+                        patient_id,
+                        video["video_id"],
+                        projection_info_by_video_key,
+                    ).to_dict(),
                     "temporal_fusion_json": (
                         f"../../stenosis_temporal_results/{patient_id}/{video['video_id']}/view_temporal_fusion.json"
                     ),
@@ -233,6 +307,23 @@ def _write_patient_files(keyframes_root: Path, frames_by_patient_video: dict[tup
         }
         (patient_dir / "patient.json").write_text(json.dumps(patient_payload, indent=2, sort_keys=True), encoding="utf-8")
         (patient_dir / "views.json").write_text(json.dumps(views_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _projection_info_for_video(
+    patient_id: str,
+    video_id: str,
+    projection_info_by_video_key: dict[str, CadicaProjectionInfo],
+) -> CadicaProjectionInfo:
+    video_key = _video_key(patient_id, video_id)
+    return projection_info_by_video_key.get(
+        video_key,
+        CadicaProjectionInfo(
+            projection_group="unknown",
+            projection_groups=[],
+            coronary_side="unknown",
+            projection_status="missing",
+        ),
+    )
 
 
 def _patient_video_summary(video_id: str, frames: list[CadicaFrame]) -> dict[str, Any]:
@@ -274,6 +365,64 @@ def _write_summary(
         "frame_label_counts": dict(sorted(Counter(frame.frame_label for frame in frames).items())),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_projection_video_key(raw_video: object) -> str | None:
+    if isinstance(raw_video, str):
+        raw_text = raw_video
+    elif isinstance(raw_video, dict):
+        patient_id = raw_video.get("patient_id") or raw_video.get("patient") or raw_video.get("p")
+        video_id = raw_video.get("video_id") or raw_video.get("video") or raw_video.get("v")
+        if isinstance(patient_id, str) and isinstance(video_id, str):
+            return _video_key(patient_id, video_id)
+        raw_text = json.dumps(raw_video, sort_keys=True)
+    else:
+        raw_text = str(raw_video)
+
+    match = PROJECTION_VIDEO_KEY_RE.search(raw_text)
+    if match is None:
+        return None
+    return _video_key(match.group(1), match.group(2))
+
+
+def _projection_info_from_groups(projection_groups: list[str]) -> CadicaProjectionInfo:
+    unique_groups = _deduplicate_groups(projection_groups)
+    if len(unique_groups) == 1:
+        group = unique_groups[0]
+        return CadicaProjectionInfo(
+            projection_group=group,
+            projection_groups=unique_groups,
+            coronary_side=_coronary_side_for_groups(unique_groups),
+            projection_status="known",
+        )
+
+    return CadicaProjectionInfo(
+        projection_group="unknown",
+        projection_groups=unique_groups,
+        coronary_side=_coronary_side_for_groups(unique_groups),
+        projection_status="ambiguous",
+    )
+
+
+def _coronary_side_for_groups(projection_groups: list[str]) -> str:
+    sides = {
+        PROJECTION_SIDE_BY_GROUP[projection_group]
+        for projection_group in projection_groups
+        if projection_group in PROJECTION_SIDE_BY_GROUP
+    }
+    if len(sides) == 1:
+        return next(iter(sides))
+    return "unknown"
+
+
+def _deduplicate_groups(projection_groups: list[str]) -> list[str]:
+    ordered_groups = ["LCA", "LCA2", "RCA"]
+    group_set = set(projection_groups)
+    return [projection_group for projection_group in ordered_groups if projection_group in group_set]
+
+
+def _video_key(patient_id: str, video_id: str) -> str:
+    return f"{patient_id.lower()}_{video_id.lower()}"
 
 
 def _csv_value(value: object) -> object:
