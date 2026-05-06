@@ -94,6 +94,7 @@ class TemporalSweepJob:
     output_root: Path
     temporal_variants: tuple[TemporalSweepVariant, ...]
     skip_existing: bool
+    write_temporal_images: bool
     write_video: bool
     video_fps: float
     video_format: str
@@ -193,6 +194,7 @@ def run_parameter_sweep(
     expected_frame_count: int = DEFAULT_VIEW_FRAME_COUNT,
     skip_existing: bool = True,
     write_debug_images: bool = True,
+    write_temporal_images: bool = True,
     write_video: bool = False,
     video_fps: float = DEFAULT_VIDEO_FPS,
     video_format: str = "mp4",
@@ -241,6 +243,7 @@ def run_parameter_sweep(
         expected_frame_count=None if allow_variable_frame_count else expected_frame_count,
         skip_existing=skip_existing,
         workers=temporal_workers,
+        write_temporal_images=write_temporal_images,
         write_video=write_video,
         video_fps=video_fps,
         video_format=video_format,
@@ -284,6 +287,7 @@ def run_parameter_sweep(
                 expected_frame_count=expected_frame_count,
                 skip_existing=skip_existing,
                 write_debug_images=write_debug_images,
+                write_temporal_images=write_temporal_images,
                 write_video=write_video,
                 video_fps=video_fps,
                 video_format=video_format,
@@ -398,6 +402,7 @@ def run_temporal_sweep(
     skip_existing: bool,
     workers: int,
     write_video: bool,
+    write_temporal_images: bool,
     video_fps: float,
     video_format: str,
 ) -> TemporalSweepSummary:
@@ -421,6 +426,7 @@ def run_temporal_sweep(
                     output_root=resolved_temporal_results_root / frame_variant.name,
                     temporal_variants=tuple(temporal_variants),
                     skip_existing=skip_existing,
+                    write_temporal_images=write_temporal_images,
                     write_video=write_video,
                     video_fps=video_fps,
                     video_format=video_format,
@@ -584,6 +590,7 @@ def _run_temporal_sweep_job(job: TemporalSweepJob) -> TemporalSweepJobResult:
         output_path = _temporal_output_path(job, temporal_variant)
         if job.skip_existing and _is_temporal_variant_complete(
             output_path,
+            write_temporal_images=job.write_temporal_images,
             write_video=job.write_video,
             video_format=job.video_format,
         ):
@@ -608,9 +615,10 @@ def _run_temporal_sweep_job(job: TemporalSweepJob) -> TemporalSweepJobResult:
     for temporal_variant, view_result in zip(pending_variants, results, strict=True):
         output_path = _temporal_output_path(job, temporal_variant)
         saved_output_path = save_view_level_result(view_result, output_path)
-        visualization_paths = save_view_visualization_outputs(view_result, saved_output_path)
         messages.append(f"Saved temporal sweep result: {saved_output_path}")
-        messages.append(f"Saved temporal sweep summary: {visualization_paths['summary_png']}")
+        if job.write_temporal_images:
+            visualization_paths = save_view_visualization_outputs(view_result, saved_output_path)
+            messages.append(f"Saved temporal sweep summary: {visualization_paths['summary_png']}")
         if job.write_video:
             video_path = save_view_demo_video(
                 view_result,
@@ -633,8 +641,16 @@ def _temporal_output_path(job: TemporalSweepJob, temporal_variant: TemporalSweep
     return job.output_root / temporal_variant.name / job.relative_view_path / "view_temporal_fusion.json"
 
 
-def _is_temporal_variant_complete(output_path: Path, *, write_video: bool, video_format: str) -> bool:
-    expected_paths = [output_path, build_view_visualization_paths(output_path)["summary_png"]]
+def _is_temporal_variant_complete(
+    output_path: Path,
+    *,
+    write_temporal_images: bool,
+    write_video: bool,
+    video_format: str,
+) -> bool:
+    expected_paths = [output_path]
+    if write_temporal_images:
+        expected_paths.append(build_view_visualization_paths(output_path)["summary_png"])
     if write_video:
         expected_paths.append(build_view_video_path(output_path, video_format=video_format))
     return all(path.is_file() and path.stat().st_size > 0 for path in expected_paths)
@@ -775,6 +791,7 @@ def _sweep_summary_payload(
     expected_frame_count: int,
     skip_existing: bool,
     write_debug_images: bool,
+    write_temporal_images: bool,
     write_video: bool,
     video_fps: float,
     video_format: str,
@@ -799,6 +816,7 @@ def _sweep_summary_payload(
             "expected_frame_count": expected_frame_count,
             "skip_existing": skip_existing,
             "write_debug_images": write_debug_images,
+            "write_temporal_images": write_temporal_images,
             "write_video": write_video,
             "video_fps": video_fps,
             "video_format": video_format,

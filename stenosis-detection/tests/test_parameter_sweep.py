@@ -15,6 +15,7 @@ from stenosis_detection.multiview import MultiViewFusionConfig
 from stenosis_detection.parameter_sweep import (
     FrameSweepVariant,
     TemporalSweepVariant,
+    _is_temporal_variant_complete,
     build_frame_sweep_variants,
     build_temporal_sweep_variants,
     run_multiview_sweep,
@@ -53,6 +54,28 @@ class ParameterSweepTests(unittest.TestCase):
             variants[-1].name,
             "min_supporting_frames_3__min_persistence_ratio_0p5",
         )
+
+    def test_temporal_variant_complete_can_skip_summary_png_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "view_temporal_fusion.json"
+            output_path.write_text("{}", encoding="utf-8")
+
+            self.assertFalse(
+                _is_temporal_variant_complete(
+                    output_path,
+                    write_temporal_images=True,
+                    write_video=False,
+                    video_format="mp4",
+                )
+            )
+            self.assertTrue(
+                _is_temporal_variant_complete(
+                    output_path,
+                    write_temporal_images=False,
+                    write_video=False,
+                    video_format="mp4",
+                )
+            )
 
     def test_multiview_sweep_runs_once_per_temporal_variant_and_skips_existing_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

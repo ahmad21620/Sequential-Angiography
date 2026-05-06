@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write only frame-level JSON outputs and skip frame-level PNG debug images.",
     )
     parser.add_argument(
+        "--no-temporal-images",
+        action="store_true",
+        help="Write temporal JSON outputs but skip temporal summary PNG images.",
+    )
+    parser.add_argument(
         "--allow-variable-frame-count",
         action="store_true",
         help="Allow each view to have its own frame count. Use this for CADICA.",
@@ -142,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_frame_count=args.expected_frame_count,
             skip_existing=not args.overwrite,
             write_debug_images=not args.no_debug_images,
+            write_temporal_images=not args.no_temporal_images,
             write_video=args.write_video,
             video_fps=args.video_fps,
             video_format=args.video_format,
