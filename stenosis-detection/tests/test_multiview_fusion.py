@@ -134,6 +134,43 @@ class MultiViewFusionTests(unittest.TestCase):
             self.assertTrue((output_root / "case_a" / "case_multiview_fusion_support_matrix.png").is_file())
             self.assertTrue((output_root / "case_b" / "case_multiview_fusion.json").is_file())
 
+    def test_tree_mode_can_skip_multiview_images_and_resume_from_json_only_output(self) -> None:
+        fixture_dir = self._fixture_dir("single_view_case")
+        payload = json.loads((fixture_dir / "multiview_input.json").read_text(encoding="utf-8"))
+        for view in payload["views"]:
+            view["temporal_fusion_json"] = str((fixture_dir / view["temporal_fusion_json"]).resolve())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            case_tree = temp_root / "cases"
+            case_root = case_tree / "case_a"
+            output_root = temp_root / "outputs"
+            case_root.mkdir(parents=True)
+            (case_root / "view_01").mkdir()
+            (case_root / "view_01" / "slice_0001.png").write_bytes(b"placeholder")
+            (case_root / "views.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            exit_code = multiview_cli._run_tree_mode(
+                case_tree,
+                output_root,
+                multiview_cli.MultiViewFusionConfig(),
+                write_images=False,
+            )
+            skipped_exit_code = multiview_cli._run_tree_mode(
+                case_tree,
+                output_root,
+                multiview_cli.MultiViewFusionConfig(),
+                skip_existing=True,
+                write_images=False,
+            )
+
+            result_path = output_root / "case_a" / "case_multiview_fusion.json"
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(skipped_exit_code, 0)
+            self.assertTrue(result_path.is_file())
+            self.assertFalse(result_path.with_name("case_multiview_fusion_summary.png").exists())
+            self.assertFalse(result_path.with_name("case_multiview_fusion_support_matrix.png").exists())
+
     def test_tree_mode_can_use_separate_temporal_results_root(self) -> None:
         fixture_dir = self._fixture_dir("single_view_case")
         payload = json.loads((fixture_dir / "multiview_input.json").read_text(encoding="utf-8"))

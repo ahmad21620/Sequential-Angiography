@@ -26,6 +26,43 @@ from stenosis_detection import (
     save_multiview_visualization_outputs,
 )
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
+    class tqdm:  # type: ignore[no-redef]
+        def __init__(self, iterable=None, *, total=None, desc=None, unit=None, dynamic_ncols=None):
+            self.iterable = iterable
+            self.total = total
+            self.desc = desc or "Progress"
+            self.unit = unit or "item"
+            self.count = 0
+            print(f"{self.desc}: 0/{self.total if self.total is not None else '?'} {self.unit}")
+
+        def __iter__(self):
+            if self.iterable is None:
+                return iter(())
+            for item in self.iterable:
+                yield item
+                self.update(1)
+
+        def update(self, n=1):
+            self.count += n
+
+        def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+            return None
+
+        def write(self, message):
+            print(message)
+
+        def close(self):
+            print(f"{self.desc}: {self.count}/{self.total if self.total is not None else '?'} {self.unit}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
 
 @dataclass(frozen=True, slots=True)
 class TreeCaseJob:
@@ -35,6 +72,7 @@ class TreeCaseJob:
     temporal_results_root: Path | None
     config: MultiViewFusionConfig
     split_by_coronary_side: bool
+    write_images: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="In tree mode, skip cases whose expected output files already exist and are non-empty.",
     )
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Write multi-view JSON outputs but skip summary/support-matrix PNG images.",
+    )
     return parser
 
 
@@ -170,6 +213,7 @@ def main() -> int:
                 split_by_coronary_side=args.split_by_coronary_side,
                 workers=args.workers,
                 skip_existing=args.skip_existing,
+                write_images=not args.no_images,
             )
 
         _run_one_case(
@@ -178,6 +222,7 @@ def main() -> int:
             config,
             temporal_results_root=temporal_results_root,
             split_by_coronary_side=args.split_by_coronary_side,
+            write_images=not args.no_images,
         )
         return 0
     except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
@@ -217,6 +262,7 @@ def _run_tree_mode(
     split_by_coronary_side: bool = False,
     workers: int = 1,
     skip_existing: bool = False,
+    write_images: bool = True,
 ) -> int:
     case_inputs = _discover_case_input_paths(case_root_tree)
     worker_count = _resolve_worker_count(workers)
@@ -225,50 +271,66 @@ def _run_tree_mode(
     skipped = 0
     failed = 0
 
-    for case_input_path in case_inputs:
-        output_path = _build_tree_output_path(case_input_path, case_root_tree, output_root)
-        if skip_existing and _is_case_output_complete(output_path, split_by_coronary_side=split_by_coronary_side):
-            skipped += 1
-            print(f"Skipped existing case: {output_path}")
-            continue
-
-        jobs.append(
-            TreeCaseJob(
-                case_input_path=case_input_path,
-                output_path=output_path,
-                case_root_tree=case_root_tree,
-                temporal_results_root=temporal_results_root,
-                config=config,
+    with tqdm(total=len(case_inputs), desc="Processing multi-view cases", unit="case", dynamic_ncols=True) as progress:
+        for case_input_path in case_inputs:
+            output_path = _build_tree_output_path(case_input_path, case_root_tree, output_root)
+            if skip_existing and _is_case_output_complete(
+                output_path,
                 split_by_coronary_side=split_by_coronary_side,
-            )
-        )
+                write_images=write_images,
+            ):
+                skipped += 1
+                progress.write(f"Skipped existing case: {output_path}")
+                progress.update(1)
+                _set_tree_progress(progress, processed=processed, skipped=skipped, failed=failed)
+                continue
 
-    if worker_count == 1 or len(jobs) <= 1:
-        for job in jobs:
-            try:
-                _run_tree_case_job(job)
-                processed += 1
-            except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
-                failed += 1
-                print(f"Failed case '{job.case_input_path}': {exc}", file=sys.stderr)
-    elif jobs:
-        active_workers = min(worker_count, len(jobs))
-        print(f"Running multi-view tree mode with {active_workers} workers.")
-        with ProcessPoolExecutor(max_workers=active_workers) as executor:
-            future_to_job = {executor.submit(_run_tree_case_job, job): job for job in jobs}
-            for future in as_completed(future_to_job):
-                job = future_to_job[future]
+            jobs.append(
+                TreeCaseJob(
+                    case_input_path=case_input_path,
+                    output_path=output_path,
+                    case_root_tree=case_root_tree,
+                    temporal_results_root=temporal_results_root,
+                    config=config,
+                    split_by_coronary_side=split_by_coronary_side,
+                    write_images=write_images,
+                )
+            )
+
+        if worker_count == 1 or len(jobs) <= 1:
+            for job in jobs:
                 try:
-                    future.result()
+                    _run_tree_case_job(job)
                     processed += 1
-                except Exception as exc:
+                except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
                     failed += 1
-                    print(f"Failed case '{job.case_input_path}': {exc}", file=sys.stderr)
+                    progress.write(f"Failed case '{job.case_input_path}': {exc}")
+                progress.update(1)
+                _set_tree_progress(progress, processed=processed, skipped=skipped, failed=failed)
+        elif jobs:
+            active_workers = min(worker_count, len(jobs))
+            progress.write(f"Running multi-view tree mode with {active_workers} workers.")
+            with ProcessPoolExecutor(max_workers=active_workers) as executor:
+                future_to_job = {executor.submit(_run_tree_case_job, job): job for job in jobs}
+                for future in as_completed(future_to_job):
+                    job = future_to_job[future]
+                    try:
+                        future.result()
+                        processed += 1
+                    except Exception as exc:
+                        failed += 1
+                        progress.write(f"Failed case '{job.case_input_path}': {exc}")
+                    progress.update(1)
+                    _set_tree_progress(progress, processed=processed, skipped=skipped, failed=failed)
 
     print(f"Processed cases: {processed}")
     print(f"Skipped cases: {skipped}")
     print(f"Failed cases: {failed}")
     return 0 if failed == 0 else 1
+
+
+def _set_tree_progress(progress, *, processed: int, skipped: int, failed: int) -> None:
+    progress.set_postfix(processed=processed, skipped=skipped, failed=failed)
 
 
 def _run_tree_case_job(job: TreeCaseJob) -> Path:
@@ -279,13 +341,14 @@ def _run_tree_case_job(job: TreeCaseJob) -> Path:
         temporal_results_root=job.temporal_results_root,
         case_root_tree=job.case_root_tree,
         split_by_coronary_side=job.split_by_coronary_side,
+        write_images=job.write_images,
     )
     return job.output_path
 
 
-def _is_case_output_complete(output_path: Path, *, split_by_coronary_side: bool) -> bool:
+def _is_case_output_complete(output_path: Path, *, split_by_coronary_side: bool, write_images: bool) -> bool:
     expected_paths = [output_path]
-    if not split_by_coronary_side:
+    if write_images and not split_by_coronary_side:
         visualization_paths = build_multiview_visualization_paths(output_path)
         expected_paths.extend(
             [
@@ -329,6 +392,7 @@ def _run_one_case(
     temporal_results_root: Path | None = None,
     case_root_tree: Path | None = None,
     split_by_coronary_side: bool = False,
+    write_images: bool = True,
 ) -> MultiViewCaseResult | dict[str, object]:
     multiview_case = load_multiview_case(
         case_input_path,
@@ -345,7 +409,8 @@ def _run_one_case(
 
     saved_path = save_multiview_case_result(case_result, output_path)
     print(f"Saved case-level result: {saved_path}")
-    _save_visualizations(case_result, saved_path)
+    if write_images:
+        _save_visualizations(case_result, saved_path)
     return case_result
 
 
