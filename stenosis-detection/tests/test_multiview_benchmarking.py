@@ -181,6 +181,104 @@ class MultiViewBenchmarkingTests(unittest.TestCase):
             self.assertFalse(result.case_rows[0]["predicted_positive"])
             self.assertEqual(result.case_rows[0]["weak_outcome"], "FN")
 
+    def test_split_multiview_positive_left_side_is_case_level_true_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            results_root = temp_root / "case_results"
+            weak_labels_path = temp_root / "weak_labels.jsonl"
+            self._write_split_multiview_result(
+                results_root / "case_001" / "case_multiview_fusion.json",
+                case_id="case_001",
+                left=self._side_result(
+                    case_id="case_001:left",
+                    final_case_lesion={
+                        "severity": "moderate",
+                        "degrees": {"median": 0.66, "max": 0.80},
+                        "distinct_supporting_view_ids": ["left_02"],
+                        "total_score": 0.88,
+                    },
+                    confidence={"score": 0.88, "label": "high"},
+                    supporting_views=["left_02"],
+                    total_candidate_count=2,
+                ),
+                right=self._side_result(
+                    case_id="case_001:right",
+                    final_case_lesion=None,
+                    confidence={"score": 0.0, "label": "low"},
+                    supporting_views=[],
+                    total_candidate_count=0,
+                ),
+            )
+            self._write_weak_labels(
+                weak_labels_path,
+                [{"case_id": "case_001", "stenosis_exists": "yes", "severity": "moderate", "confidence": "high"}],
+            )
+
+            result = run_multiview_level_benchmark(
+                results_root=results_root,
+                weak_labels_path=weak_labels_path,
+                output_root=temp_root / "benchmarks",
+                write_threshold_sweep_report=True,
+            )
+
+            row = result.case_rows[0]
+            self.assertEqual(row["case_id"], "case_001")
+            self.assertTrue(row["predicted_positive"])
+            self.assertEqual(row["weak_outcome"], "TP")
+            self.assertTrue(row["split_by_coronary_side"])
+            self.assertEqual(row["selected_side"], "left")
+            self.assertEqual(row["side_positive_count"], 1)
+            self.assertTrue(row["left_predicted_positive"])
+            self.assertFalse(row["right_predicted_positive"])
+            self.assertAlmostEqual(row["confidence_score"], 0.88)
+            self.assertAlmostEqual(row["final_degree"], 0.66)
+
+            sweep_rows = self._read_csv(temp_root / "benchmarks" / "threshold_sweep_multiview.csv")
+            self.assertTrue(any(row["score_name"] == "confidence_score" for row in sweep_rows))
+
+    def test_split_multiview_no_lesion_is_case_level_true_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            results_root = temp_root / "case_results"
+            weak_labels_path = temp_root / "weak_labels.jsonl"
+            self._write_split_multiview_result(
+                results_root / "case_001" / "case_multiview_fusion.json",
+                case_id="case_001",
+                left=self._side_result(
+                    case_id="case_001:left",
+                    final_case_lesion=None,
+                    confidence={"score": 0.0, "label": "low"},
+                    supporting_views=[],
+                    total_candidate_count=0,
+                ),
+                right=self._side_result(
+                    case_id="case_001:right",
+                    final_case_lesion=None,
+                    confidence={"score": 0.0, "label": "low"},
+                    supporting_views=[],
+                    total_candidate_count=0,
+                ),
+            )
+            self._write_weak_labels(
+                weak_labels_path,
+                [{"case_id": "case_001", "stenosis_exists": "no", "severity": "none", "confidence": "high"}],
+            )
+
+            result = run_multiview_level_benchmark(
+                results_root=results_root,
+                weak_labels_path=weak_labels_path,
+                output_root=temp_root / "benchmarks",
+            )
+
+            row = result.case_rows[0]
+            self.assertFalse(row["predicted_positive"])
+            self.assertEqual(row["weak_outcome"], "TN")
+            self.assertTrue(row["split_by_coronary_side"])
+            self.assertEqual(row["selected_side"], "left")
+            self.assertEqual(row["side_positive_count"], 0)
+            self.assertFalse(row["left_predicted_positive"])
+            self.assertFalse(row["right_predicted_positive"])
+
     def test_multiview_benchmark_rejects_mismatched_json_case_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -225,6 +323,43 @@ class MultiViewBenchmarkingTests(unittest.TestCase):
             "fusion_metadata": {"total_candidate_count": total_candidate_count},
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_split_multiview_result(
+        self,
+        path: Path,
+        *,
+        case_id: str,
+        left: dict[str, object],
+        right: dict[str, object],
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "case_id": case_id,
+            "split_by_coronary_side": True,
+            "side_results": {
+                "left": left,
+                "right": right,
+            },
+            "skipped_sides": [],
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _side_result(
+        self,
+        *,
+        case_id: str,
+        final_case_lesion: dict[str, object] | None,
+        confidence: dict[str, object],
+        supporting_views: list[str],
+        total_candidate_count: int,
+    ) -> dict[str, object]:
+        return {
+            "case_id": case_id,
+            "final_case_lesion": final_case_lesion,
+            "confidence": confidence,
+            "supporting_views": supporting_views,
+            "fusion_metadata": {"total_candidate_count": total_candidate_count},
+        }
 
     def _write_weak_labels(self, path: Path, rows: list[dict[str, object]]) -> None:
         path.write_text(

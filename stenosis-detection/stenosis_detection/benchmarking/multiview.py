@@ -58,6 +58,34 @@ class MultiViewBenchmarkResult:
     threshold_sweep_paths: dict[str, Path]
 
 
+@dataclass(frozen=True, slots=True)
+class _CasePredictionValues:
+    predicted_positive: bool
+    final_severity: str | None
+    final_degree: float
+    final_max_degree: float
+    total_score: float
+    confidence_score: float
+    confidence_label: str | None
+    supporting_view_count: int
+    distinct_supporting_view_count: int
+    total_candidate_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedMultiViewValues:
+    prediction: _CasePredictionValues
+    split_by_coronary_side: bool
+    selected_side: str | None
+    side_positive_count: int | None
+    left_predicted_positive: bool | None
+    right_predicted_positive: bool | None
+    left_confidence_score: float | None
+    right_confidence_score: float | None
+    left_final_degree: float | None
+    right_final_degree: float | None
+
+
 def run_multiview_level_benchmark(
     *,
     results_root: str | Path,
@@ -236,6 +264,150 @@ def _build_case_row(
     else:
         case_id = path_case_id
 
+    resolved_values = _resolve_multiview_values(
+        payload,
+        multiview_min_confidence_score=multiview_min_confidence_score,
+        multiview_min_degree=multiview_min_degree,
+        require_distinct_supporting_view=require_distinct_supporting_view,
+    )
+    prediction = resolved_values.prediction
+
+    label = weak_labels.get(case_id)
+    weak_outcome, skip_reason, label_target = _weak_outcome(
+        prediction.predicted_positive,
+        label,
+        include_unclear_labels=include_unclear_labels,
+    )
+
+    return {
+        "case_id": case_id,
+        "path_case_id": path_case_id,
+        "relative_path": relative_path.as_posix(),
+        "source_path": str(result_path),
+        "predicted_positive": prediction.predicted_positive,
+        "split_by_coronary_side": resolved_values.split_by_coronary_side,
+        "selected_side": resolved_values.selected_side,
+        "side_positive_count": resolved_values.side_positive_count,
+        "left_predicted_positive": resolved_values.left_predicted_positive,
+        "right_predicted_positive": resolved_values.right_predicted_positive,
+        "left_confidence_score": resolved_values.left_confidence_score,
+        "right_confidence_score": resolved_values.right_confidence_score,
+        "left_final_degree": resolved_values.left_final_degree,
+        "right_final_degree": resolved_values.right_final_degree,
+        "final_severity": prediction.final_severity,
+        "final_degree": prediction.final_degree,
+        "final_max_degree": prediction.final_max_degree,
+        "total_score": prediction.total_score,
+        "confidence_score": prediction.confidence_score,
+        "confidence_label": prediction.confidence_label,
+        "supporting_view_count": prediction.supporting_view_count,
+        "distinct_supporting_view_count": prediction.distinct_supporting_view_count,
+        "total_candidate_count": prediction.total_candidate_count,
+        "multiview_min_confidence_score": float(multiview_min_confidence_score),
+        "multiview_min_degree": float(multiview_min_degree),
+        "require_distinct_supporting_view": require_distinct_supporting_view,
+        **_label_fields(label, label_target=label_target),
+        **severity_row_fields(
+            label_severity=None if label is None else label.severity,
+            pipeline_severity=prediction.final_severity,
+            label_target=label_target,
+            predicted_positive=prediction.predicted_positive,
+        ),
+        "weak_outcome": weak_outcome,
+        "skip_reason": skip_reason,
+    }
+
+
+def _resolve_multiview_values(
+    payload: dict[str, Any],
+    *,
+    multiview_min_confidence_score: float,
+    multiview_min_degree: float,
+    require_distinct_supporting_view: bool,
+) -> _ResolvedMultiViewValues:
+    if payload.get("split_by_coronary_side") is True and isinstance(payload.get("side_results"), dict):
+        return _resolve_split_multiview_values(
+            payload,
+            multiview_min_confidence_score=multiview_min_confidence_score,
+            multiview_min_degree=multiview_min_degree,
+            require_distinct_supporting_view=require_distinct_supporting_view,
+        )
+
+    return _ResolvedMultiViewValues(
+        prediction=_extract_case_prediction_values(
+            payload,
+            multiview_min_confidence_score=multiview_min_confidence_score,
+            multiview_min_degree=multiview_min_degree,
+            require_distinct_supporting_view=require_distinct_supporting_view,
+        ),
+        split_by_coronary_side=False,
+        selected_side=None,
+        side_positive_count=None,
+        left_predicted_positive=None,
+        right_predicted_positive=None,
+        left_confidence_score=None,
+        right_confidence_score=None,
+        left_final_degree=None,
+        right_final_degree=None,
+    )
+
+
+def _resolve_split_multiview_values(
+    payload: dict[str, Any],
+    *,
+    multiview_min_confidence_score: float,
+    multiview_min_degree: float,
+    require_distinct_supporting_view: bool,
+) -> _ResolvedMultiViewValues:
+    side_results = payload.get("side_results")
+    side_payloads = side_results if isinstance(side_results, dict) else {}
+    side_values: dict[str, _CasePredictionValues] = {}
+    for side in ("left", "right"):
+        side_payload = side_payloads.get(side)
+        if isinstance(side_payload, dict):
+            side_values[side] = _extract_case_prediction_values(
+                side_payload,
+                multiview_min_confidence_score=multiview_min_confidence_score,
+                multiview_min_degree=multiview_min_degree,
+                require_distinct_supporting_view=require_distinct_supporting_view,
+            )
+
+    selected_side = _select_best_side(side_values)
+    prediction = side_values[selected_side] if selected_side is not None else _empty_case_prediction_values()
+    side_positive_count = sum(1 for values in side_values.values() if values.predicted_positive)
+
+    return _ResolvedMultiViewValues(
+        prediction=_CasePredictionValues(
+            predicted_positive=side_positive_count > 0,
+            final_severity=prediction.final_severity,
+            final_degree=prediction.final_degree,
+            final_max_degree=prediction.final_max_degree,
+            total_score=prediction.total_score,
+            confidence_score=prediction.confidence_score,
+            confidence_label=prediction.confidence_label,
+            supporting_view_count=prediction.supporting_view_count,
+            distinct_supporting_view_count=prediction.distinct_supporting_view_count,
+            total_candidate_count=prediction.total_candidate_count,
+        ),
+        split_by_coronary_side=True,
+        selected_side=selected_side,
+        side_positive_count=side_positive_count,
+        left_predicted_positive=_side_predicted_positive(side_values, "left"),
+        right_predicted_positive=_side_predicted_positive(side_values, "right"),
+        left_confidence_score=_side_confidence_score(side_values, "left"),
+        right_confidence_score=_side_confidence_score(side_values, "right"),
+        left_final_degree=_side_final_degree(side_values, "left"),
+        right_final_degree=_side_final_degree(side_values, "right"),
+    )
+
+
+def _extract_case_prediction_values(
+    payload: dict[str, Any],
+    *,
+    multiview_min_confidence_score: float,
+    multiview_min_degree: float,
+    require_distinct_supporting_view: bool,
+) -> _CasePredictionValues:
     final_case_lesion = payload.get("final_case_lesion") if isinstance(payload.get("final_case_lesion"), dict) else None
     degrees = final_case_lesion.get("degrees") if isinstance(final_case_lesion, dict) and isinstance(final_case_lesion.get("degrees"), dict) else {}
     confidence = payload.get("confidence") if isinstance(payload.get("confidence"), dict) else {}
@@ -256,7 +428,6 @@ def _build_case_row(
     total_score = 0.0 if total_score is None else total_score
     confidence_score = 0.0 if confidence_score is None else confidence_score
     distinct_supporting_view_count = len(distinct_supporting_view_ids)
-    final_severity = final_case_lesion.get("severity") if final_case_lesion is not None else None
     predicted_positive = (
         final_case_lesion is not None
         and final_degree >= multiview_min_degree
@@ -264,41 +435,62 @@ def _build_case_row(
         and (not require_distinct_supporting_view or distinct_supporting_view_count > 0)
     )
 
-    label = weak_labels.get(case_id)
-    weak_outcome, skip_reason, label_target = _weak_outcome(
-        predicted_positive,
-        label,
-        include_unclear_labels=include_unclear_labels,
+    return _CasePredictionValues(
+        predicted_positive=predicted_positive,
+        final_severity=final_case_lesion.get("severity") if final_case_lesion is not None else None,
+        final_degree=final_degree,
+        final_max_degree=final_max_degree,
+        total_score=total_score,
+        confidence_score=confidence_score,
+        confidence_label=confidence.get("label") if isinstance(confidence.get("label"), str) else None,
+        supporting_view_count=len(supporting_views),
+        distinct_supporting_view_count=distinct_supporting_view_count,
+        total_candidate_count=_coerce_int(fusion_metadata.get("total_candidate_count")),
     )
 
-    return {
-        "case_id": case_id,
-        "path_case_id": path_case_id,
-        "relative_path": relative_path.as_posix(),
-        "source_path": str(result_path),
-        "predicted_positive": predicted_positive,
-        "final_severity": final_severity,
-        "final_degree": final_degree,
-        "final_max_degree": final_max_degree,
-        "total_score": total_score,
-        "confidence_score": confidence_score,
-        "confidence_label": confidence.get("label"),
-        "supporting_view_count": len(supporting_views),
-        "distinct_supporting_view_count": distinct_supporting_view_count,
-        "total_candidate_count": _coerce_int(fusion_metadata.get("total_candidate_count")),
-        "multiview_min_confidence_score": float(multiview_min_confidence_score),
-        "multiview_min_degree": float(multiview_min_degree),
-        "require_distinct_supporting_view": require_distinct_supporting_view,
-        **_label_fields(label, label_target=label_target),
-        **severity_row_fields(
-            label_severity=None if label is None else label.severity,
-            pipeline_severity=final_severity,
-            label_target=label_target,
-            predicted_positive=predicted_positive,
+
+def _select_best_side(side_values: dict[str, _CasePredictionValues]) -> str | None:
+    if not side_values:
+        return None
+    return max(
+        side_values,
+        key=lambda side: (
+            side_values[side].predicted_positive,
+            side_values[side].confidence_score,
+            side_values[side].final_degree,
+            side_values[side].total_score,
         ),
-        "weak_outcome": weak_outcome,
-        "skip_reason": skip_reason,
-    }
+    )
+
+
+def _empty_case_prediction_values() -> _CasePredictionValues:
+    return _CasePredictionValues(
+        predicted_positive=False,
+        final_severity=None,
+        final_degree=0.0,
+        final_max_degree=0.0,
+        total_score=0.0,
+        confidence_score=0.0,
+        confidence_label=None,
+        supporting_view_count=0,
+        distinct_supporting_view_count=0,
+        total_candidate_count=None,
+    )
+
+
+def _side_predicted_positive(side_values: dict[str, _CasePredictionValues], side: str) -> bool | None:
+    values = side_values.get(side)
+    return None if values is None else values.predicted_positive
+
+
+def _side_confidence_score(side_values: dict[str, _CasePredictionValues], side: str) -> float | None:
+    values = side_values.get(side)
+    return None if values is None else values.confidence_score
+
+
+def _side_final_degree(side_values: dict[str, _CasePredictionValues], side: str) -> float | None:
+    values = side_values.get(side)
+    return None if values is None else values.final_degree
 
 
 def _build_breakdown(
@@ -365,6 +557,15 @@ MULTIVIEW_CASE_ROW_FIELDS = [
     "relative_path",
     "source_path",
     "predicted_positive",
+    "split_by_coronary_side",
+    "selected_side",
+    "side_positive_count",
+    "left_predicted_positive",
+    "right_predicted_positive",
+    "left_confidence_score",
+    "right_confidence_score",
+    "left_final_degree",
+    "right_final_degree",
     "final_severity",
     "pipeline_severity",
     "weak_label_severity_normalized",

@@ -234,3 +234,30 @@ Sweep score sources:
 
 Threshold sweeps are analysis reports only. They do not update detector,
 temporal fusion, or multi-view fusion parameters.
+
+## Final Sweep Benchmark Report
+
+After a full stenosis sweep has been benchmarked, generate the compact final
+binary detection report with:
+
+```bash
+python scripts/report_sweep_benchmark.py \
+  --sweep-root work/cadica_sweep \
+  --output-root work/cadica_sweep/final_benchmark_report \
+  --top-k 25
+```
+
+If `--benchmark-root` is omitted, the report reads
+`<sweep-root>/benchmark_results`. The report only uses existing benchmark
+outputs; it does not rerun frame detection, temporal fusion, multi-view fusion,
+or benchmarking.
+
+This report is for final binary stenosis detection metrics. It ignores
+severity-related summaries and level-of-stenosis statistics. Multi-view is the
+primary final case-level result. Frame and temporal summaries are included only
+as comparison stages.
+
+When the sweep used `--multiview-split-by-coronary-side`, left and right side
+fusion outputs are combined into one case-level binary prediction. A case is
+positive if either side has a valid final lesion that passes the multi-view
+benchmark thresholds.
