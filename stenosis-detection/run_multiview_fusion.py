@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 from stenosis_detection import (
@@ -16,11 +19,22 @@ from stenosis_detection import (
     MultiViewCaseResult,
     MultiViewFusionConfig,
     MultiViewLoadError,
+    build_multiview_visualization_paths,
     load_multiview_case,
     run_multiview_fusion,
     save_multiview_case_result,
     save_multiview_visualization_outputs,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TreeCaseJob:
+    case_input_path: Path
+    output_path: Path
+    case_root_tree: Path
+    temporal_results_root: Path | None
+    config: MultiViewFusionConfig
+    split_by_coronary_side: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +112,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run separate left/right fusions using coronary_side metadata and report unknown-side views.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Tree-mode worker processes. Use 0 for all CPU cores. Default: 1.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="In tree mode, skip cases whose expected output files already exist and are non-empty.",
+    )
     return parser
 
 
@@ -117,6 +142,8 @@ def main() -> int:
         parser.error("--high-confidence-threshold must be in the range [0.0, 1.0].")
     if args.medium_confidence_threshold > args.high_confidence_threshold:
         parser.error("--medium-confidence-threshold must be <= --high-confidence-threshold.")
+    if args.workers < 0:
+        parser.error("--workers must be 0 or greater.")
     if args.case_root_tree is not None:
         if args.output_root is None:
             parser.error("--case-root-tree requires --output-root.")
@@ -141,6 +168,8 @@ def main() -> int:
                 config,
                 temporal_results_root=temporal_results_root,
                 split_by_coronary_side=args.split_by_coronary_side,
+                workers=args.workers,
+                skip_existing=args.skip_existing,
             )
 
         _run_one_case(
@@ -186,30 +215,93 @@ def _run_tree_mode(
     *,
     temporal_results_root: Path | None = None,
     split_by_coronary_side: bool = False,
+    workers: int = 1,
+    skip_existing: bool = False,
 ) -> int:
     case_inputs = _discover_case_input_paths(case_root_tree)
+    worker_count = _resolve_worker_count(workers)
+    jobs: list[TreeCaseJob] = []
     processed = 0
+    skipped = 0
     failed = 0
 
     for case_input_path in case_inputs:
         output_path = _build_tree_output_path(case_input_path, case_root_tree, output_root)
-        try:
-            _run_one_case(
-                case_input_path,
-                output_path,
-                config,
-                temporal_results_root=temporal_results_root,
+        if skip_existing and _is_case_output_complete(output_path, split_by_coronary_side=split_by_coronary_side):
+            skipped += 1
+            print(f"Skipped existing case: {output_path}")
+            continue
+
+        jobs.append(
+            TreeCaseJob(
+                case_input_path=case_input_path,
+                output_path=output_path,
                 case_root_tree=case_root_tree,
+                temporal_results_root=temporal_results_root,
+                config=config,
                 split_by_coronary_side=split_by_coronary_side,
             )
-            processed += 1
-        except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
-            failed += 1
-            print(f"Failed case '{case_input_path}': {exc}", file=sys.stderr)
+        )
+
+    if worker_count == 1 or len(jobs) <= 1:
+        for job in jobs:
+            try:
+                _run_tree_case_job(job)
+                processed += 1
+            except (FileNotFoundError, NotADirectoryError, MultiViewLoadError, ValueError) as exc:
+                failed += 1
+                print(f"Failed case '{job.case_input_path}': {exc}", file=sys.stderr)
+    elif jobs:
+        active_workers = min(worker_count, len(jobs))
+        print(f"Running multi-view tree mode with {active_workers} workers.")
+        with ProcessPoolExecutor(max_workers=active_workers) as executor:
+            future_to_job = {executor.submit(_run_tree_case_job, job): job for job in jobs}
+            for future in as_completed(future_to_job):
+                job = future_to_job[future]
+                try:
+                    future.result()
+                    processed += 1
+                except Exception as exc:
+                    failed += 1
+                    print(f"Failed case '{job.case_input_path}': {exc}", file=sys.stderr)
 
     print(f"Processed cases: {processed}")
+    print(f"Skipped cases: {skipped}")
     print(f"Failed cases: {failed}")
     return 0 if failed == 0 else 1
+
+
+def _run_tree_case_job(job: TreeCaseJob) -> Path:
+    _run_one_case(
+        job.case_input_path,
+        job.output_path,
+        job.config,
+        temporal_results_root=job.temporal_results_root,
+        case_root_tree=job.case_root_tree,
+        split_by_coronary_side=job.split_by_coronary_side,
+    )
+    return job.output_path
+
+
+def _is_case_output_complete(output_path: Path, *, split_by_coronary_side: bool) -> bool:
+    expected_paths = [output_path]
+    if not split_by_coronary_side:
+        visualization_paths = build_multiview_visualization_paths(output_path)
+        expected_paths.extend(
+            [
+                visualization_paths["summary_png"],
+                visualization_paths["support_matrix_png"],
+            ]
+        )
+    return all(path.is_file() and path.stat().st_size > 0 for path in expected_paths)
+
+
+def _resolve_worker_count(workers: int) -> int:
+    if workers < 0:
+        raise ValueError("workers must be 0 or greater.")
+    if workers == 0:
+        return max(1, os.cpu_count() or 1)
+    return workers
 
 
 def _discover_case_input_paths(case_root_tree: Path) -> list[Path]:
