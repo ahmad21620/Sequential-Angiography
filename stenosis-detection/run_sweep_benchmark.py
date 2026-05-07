@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -86,6 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop after the first failed variant instead of recording the failure and continuing.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of benchmark variants to process in parallel. Use 0 for all CPU cores. Default: 1.",
+    )
     parser.add_argument("--frame-min-degree", type=float, default=0.0)
     parser.add_argument("--temporal-min-degree", type=float, default=0.0)
     parser.add_argument("--temporal-min-persistence-ratio", type=float, default=0.0)
@@ -109,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             levels=_resolve_levels(args.levels, Path(args.sweep_root)),
             skip_existing=args.skip_existing,
             fail_fast=args.fail_fast,
+            workers=args.workers,
             frame_min_degree=args.frame_min_degree,
             temporal_min_degree=args.temporal_min_degree,
             temporal_min_persistence_ratio=args.temporal_min_persistence_ratio,
@@ -137,6 +146,7 @@ def run_sweep_benchmark(
     levels: tuple[str, ...] | None = None,
     skip_existing: bool = False,
     fail_fast: bool = False,
+    workers: int = 1,
     frame_min_degree: float = 0.0,
     temporal_min_degree: float = 0.0,
     temporal_min_persistence_ratio: float = 0.0,
@@ -148,6 +158,7 @@ def run_sweep_benchmark(
 ) -> dict[str, Any]:
     resolved_sweep_root = Path(sweep_root)
     _validate_sweep_root(resolved_sweep_root)
+    worker_count = _resolve_worker_count(workers)
     resolved_weak_labels_path = Path(weak_labels_path)
     load_weak_labels_jsonl(resolved_weak_labels_path)
 
@@ -166,36 +177,72 @@ def run_sweep_benchmark(
     completed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    pending_jobs: list[SweepBenchmarkJob] = []
 
     for index, job in enumerate(jobs, start=1):
-        print(f"[{index}/{len(jobs)}] Benchmarking {job.label}")
         if skip_existing and _expected_summary_path(job).is_file():
             skipped.append(_job_payload(job, status="skipped"))
-            print(f"Skipped existing benchmark: {_expected_summary_path(job)}")
+            print(f"[{index}/{len(jobs)}] Skipped existing benchmark: {_expected_summary_path(job)}")
             continue
+        pending_jobs.append(job)
 
-        try:
-            result = _run_job(
-                job,
-                weak_labels_path=resolved_weak_labels_path,
-                frame_min_degree=frame_min_degree,
-                temporal_min_degree=temporal_min_degree,
-                temporal_min_persistence_ratio=temporal_min_persistence_ratio,
-                multiview_min_confidence_score=multiview_min_confidence_score,
-                multiview_min_degree=multiview_min_degree,
-                require_distinct_supporting_view=require_distinct_supporting_view,
-                write_threshold_sweep_report=write_threshold_sweep_report,
-                include_unclear_labels=include_unclear_labels,
-            )
-        except (FileNotFoundError, NotADirectoryError, BenchmarkIOError, WeakLabelLoadError, ValueError, OSError, json.JSONDecodeError) as exc:
-            failure = {**_job_payload(job, status="failed"), "error": str(exc)}
-            failures.append(failure)
-            print(f"Failed {job.label}: {exc}", file=sys.stderr)
-            if fail_fast:
-                break
-            continue
-
-        completed.append({**_job_payload(job, status="completed"), **_result_payload(job.level, result)})
+    if worker_count == 1 or len(pending_jobs) <= 1:
+        for index, job in enumerate(pending_jobs, start=1):
+            print(f"[{index}/{len(pending_jobs)}] Benchmarking {job.label}")
+            try:
+                completed.append(
+                    _run_job_payload(
+                        job,
+                        weak_labels_path=resolved_weak_labels_path,
+                        frame_min_degree=frame_min_degree,
+                        temporal_min_degree=temporal_min_degree,
+                        temporal_min_persistence_ratio=temporal_min_persistence_ratio,
+                        multiview_min_confidence_score=multiview_min_confidence_score,
+                        multiview_min_degree=multiview_min_degree,
+                        require_distinct_supporting_view=require_distinct_supporting_view,
+                        write_threshold_sweep_report=write_threshold_sweep_report,
+                        include_unclear_labels=include_unclear_labels,
+                    )
+                )
+            except Exception as exc:
+                failure = {**_job_payload(job, status="failed"), "error": str(exc)}
+                failures.append(failure)
+                print(f"Failed {job.label}: {exc}", file=sys.stderr)
+                if fail_fast:
+                    break
+    elif pending_jobs:
+        active_workers = min(worker_count, len(pending_jobs))
+        print(f"Running {len(pending_jobs)} sweep benchmark jobs with {active_workers} workers.")
+        with ProcessPoolExecutor(max_workers=active_workers) as executor:
+            future_to_job = {
+                executor.submit(
+                    _run_job_payload,
+                    job,
+                    weak_labels_path=resolved_weak_labels_path,
+                    frame_min_degree=frame_min_degree,
+                    temporal_min_degree=temporal_min_degree,
+                    temporal_min_persistence_ratio=temporal_min_persistence_ratio,
+                    multiview_min_confidence_score=multiview_min_confidence_score,
+                    multiview_min_degree=multiview_min_degree,
+                    require_distinct_supporting_view=require_distinct_supporting_view,
+                    write_threshold_sweep_report=write_threshold_sweep_report,
+                    include_unclear_labels=include_unclear_labels,
+                ): job
+                for job in pending_jobs
+            }
+            for index, future in enumerate(as_completed(future_to_job), start=1):
+                job = future_to_job[future]
+                try:
+                    completed.append(future.result())
+                    print(f"[{index}/{len(pending_jobs)}] Completed {job.label}")
+                except Exception as exc:
+                    failure = {**_job_payload(job, status="failed"), "error": str(exc)}
+                    failures.append(failure)
+                    print(f"Failed {job.label}: {exc}", file=sys.stderr)
+                    if fail_fast:
+                        for pending_future in future_to_job:
+                            pending_future.cancel()
+                        break
 
     summary_path = resolved_output_root / "sweep_benchmark_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +254,7 @@ def run_sweep_benchmark(
         "config": {
             "skip_existing": skip_existing,
             "fail_fast": fail_fast,
+            "workers": worker_count,
             "frame_min_degree": float(frame_min_degree),
             "temporal_min_degree": float(temporal_min_degree),
             "temporal_min_persistence_ratio": float(temporal_min_persistence_ratio),
@@ -227,6 +275,34 @@ def run_sweep_benchmark(
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return summary
+
+
+def _run_job_payload(
+    job: SweepBenchmarkJob,
+    *,
+    weak_labels_path: Path,
+    frame_min_degree: float,
+    temporal_min_degree: float,
+    temporal_min_persistence_ratio: float,
+    multiview_min_confidence_score: float,
+    multiview_min_degree: float,
+    require_distinct_supporting_view: bool,
+    write_threshold_sweep_report: bool,
+    include_unclear_labels: bool,
+) -> dict[str, Any]:
+    result = _run_job(
+        job,
+        weak_labels_path=weak_labels_path,
+        frame_min_degree=frame_min_degree,
+        temporal_min_degree=temporal_min_degree,
+        temporal_min_persistence_ratio=temporal_min_persistence_ratio,
+        multiview_min_confidence_score=multiview_min_confidence_score,
+        multiview_min_degree=multiview_min_degree,
+        require_distinct_supporting_view=require_distinct_supporting_view,
+        write_threshold_sweep_report=write_threshold_sweep_report,
+        include_unclear_labels=include_unclear_labels,
+    )
+    return {**_job_payload(job, status="completed"), **_result_payload(job.level, result)}
 
 
 def _run_job(
@@ -394,6 +470,14 @@ def _validate_sweep_root(sweep_root: Path) -> None:
         raise FileNotFoundError(f"Sweep root does not exist: {sweep_root}")
     if not sweep_root.is_dir():
         raise NotADirectoryError(f"Sweep root is not a directory: {sweep_root}")
+
+
+def _resolve_worker_count(workers: int) -> int:
+    if workers < 0:
+        raise ValueError("workers must be 0 or greater.")
+    if workers == 0:
+        return max(1, os.cpu_count() or 1)
+    return workers
 
 
 def _child_dirs(root: Path) -> list[Path]:

@@ -56,10 +56,12 @@ class SweepBenchmarkTests(unittest.TestCase):
                 weak_labels_path=weak_labels,
                 output_root=output_root,
                 levels=("frame", "temporal", "multiview"),
+                workers=2,
             )
 
             self.assertEqual(summary["completed_jobs"], 3)
             self.assertEqual(summary["failed_jobs"], 0)
+            self.assertEqual(summary["config"]["workers"], 2)
             self.assertTrue((output_root / "frame" / frame_variant / "frame_summary.json").is_file())
             self.assertTrue(
                 (
