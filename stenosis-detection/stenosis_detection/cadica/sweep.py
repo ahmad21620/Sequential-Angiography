@@ -10,6 +10,25 @@ from pathlib import Path
 import sys
 from typing import Any, Iterable
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
+    class tqdm:  # type: ignore[no-redef]
+        def __init__(self, iterable: Iterable[Any] | None = None, **_kwargs: Any) -> None:
+            self.iterable = iterable
+
+        def __enter__(self) -> "tqdm":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def __iter__(self) -> Iterable[Any]:
+            return iter(()) if self.iterable is None else iter(self.iterable)
+
+        def update(self, _count: int = 1) -> None:
+            return None
+
 from .benchmark import (
     CADICA_SUPERVISED_NOTE,
     MULTIVIEW_PATIENT_ROW_FIELDS,
@@ -222,9 +241,29 @@ def _evaluate_sweep_jobs(
     frame_predictions: dict[Any, Any],
     workers: int,
 ) -> list[dict[str, Any]]:
+    description = "Benchmarking CADICA sweep"
     if workers == 1 or len(jobs) <= 1:
-        return [
-            _evaluate_sweep_job(
+        rows: list[dict[str, Any]] = []
+        with tqdm(total=len(jobs), desc=description, unit="combo", dynamic_ncols=True) as progress:
+            for job in jobs:
+                rows.append(
+                    _evaluate_sweep_job(
+                        job,
+                        manifest=manifest,
+                        frame_results_root=frame_results_root,
+                        output_root=output_root,
+                        temporal_results_root=temporal_results_root,
+                        multiview_results_root=multiview_results_root,
+                        manifest_frames=manifest_frames,
+                        frame_predictions=frame_predictions,
+                    )
+                )
+                progress.update(1)
+        return rows
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        row_iter = executor.map(
+            lambda job: _evaluate_sweep_job(
                 job,
                 manifest=manifest,
                 frame_results_root=frame_results_root,
@@ -233,26 +272,14 @@ def _evaluate_sweep_jobs(
                 multiview_results_root=multiview_results_root,
                 manifest_frames=manifest_frames,
                 frame_predictions=frame_predictions,
-            )
-            for job in jobs
-        ]
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        rows = list(
-            executor.map(
-                lambda job: _evaluate_sweep_job(
-                    job,
-                    manifest=manifest,
-                    frame_results_root=frame_results_root,
-                    output_root=output_root,
-                    temporal_results_root=temporal_results_root,
-                    multiview_results_root=multiview_results_root,
-                    manifest_frames=manifest_frames,
-                    frame_predictions=frame_predictions,
-                ),
-                jobs,
-            )
+            ),
+            jobs,
         )
+        rows = []
+        with tqdm(total=len(jobs), desc=description, unit="combo", dynamic_ncols=True) as progress:
+            for row in row_iter:
+                rows.append(row)
+                progress.update(1)
     return rows
 
 
