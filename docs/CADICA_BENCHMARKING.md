@@ -326,3 +326,35 @@ multi-view confidence/score required for a saved multi-view result to count as
 positive. `--workers` parallelizes evaluation of sweep combinations across
 worker processes. The sweep
 reloads existing prediction JSONs only; it does not rerun the pipeline.
+
+## Final CADICA Benchmark Report
+
+After running the CADICA benchmark sweep, create a compact final report from
+the existing supervised outputs:
+
+```bash
+python scripts/report_cadica_benchmark.py \
+  --benchmark-root work/cadica_benchmark_sweep \
+  --output-root work/cadica_benchmark_sweep/final_report \
+  --top-k 25
+```
+
+The report script reads `cadica_threshold_sweep.csv`,
+`cadica_threshold_sweep_summary.json`, `cadica_summary.json`, and optional
+multi-view row files if they exist. It does not use weak labels, does not read
+`views.json`, and does not rerun segmentation, stenosis detection, temporal
+fusion, multi-view fusion, or benchmarking.
+
+Generated outputs include:
+
+- `final_report/report.md`
+- `final_report/report.html`
+- `final_report/summary.json`
+- ranked CSV tables under `final_report/tables/`
+- presentation plots under `final_report/plots/`
+
+When multi-view benchmark outputs are present, the primary operating-point
+ranking is multi-view patient-level F1. Otherwise the report falls back to the
+patient aggregation metrics from the frame/temporal benchmark. Frame,
+video/temporal, patient aggregation, multi-view patient, and optional
+multi-view coronary-side metrics are kept separate in the report.
