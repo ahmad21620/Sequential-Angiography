@@ -415,6 +415,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--sweep-multiview-min-scores",
         help="Comma-separated multi-view score thresholds for --write-threshold-sweep.",
     )
+    parser.add_argument(
+        "--sweep-workers",
+        type=int,
+        default=1,
+        help="Number of worker threads used when --write-threshold-sweep is enabled.",
+    )
     return parser
 
 
@@ -465,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.sweep_multiview_min_scores is None
                     else parse_float_list(args.sweep_multiview_min_scores)
                 ),
+                workers=args.sweep_workers,
             )
     except (FileNotFoundError, NotADirectoryError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"CADICA benchmark failed: {exc}", file=sys.stderr)

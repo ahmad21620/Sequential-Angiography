@@ -296,7 +296,8 @@ python scripts/run_cadica_benchmark_sweep.py \
   --frame-min-degrees 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 \
   --box-margins-px 0,5,10 \
   --video-prediction-sources frame_any,temporal_final \
-  --multiview-min-scores 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50
+  --multiview-min-scores 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 \
+  --workers 8
 ```
 
 You can also ask the normal CADICA benchmark command to write the threshold
@@ -309,7 +310,8 @@ python scripts/run_cadica_benchmark.py \
   --temporal-results-root work/cadica_temporal_results \
   --multiview-results-root work/cadica_multiview_results \
   --output-root work/cadica_benchmark \
-  --write-threshold-sweep
+  --write-threshold-sweep \
+  --sweep-workers 8
 ```
 
 Outputs:
@@ -321,5 +323,5 @@ Outputs:
 positive. `box_margin_px` controls the tolerance around CADICA GT boxes for
 point-in-box localization. `multiview_min_score` controls the minimum
 multi-view confidence/score required for a saved multi-view result to count as
-positive. The sweep reloads existing prediction JSONs only; it does not rerun
-the pipeline.
+positive. `--workers` parallelizes evaluation of sweep combinations. The sweep
+reloads existing prediction JSONs only; it does not rerun the pipeline.

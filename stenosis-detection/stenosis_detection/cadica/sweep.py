@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
+from dataclasses import dataclass
 import itertools
 import json
 from pathlib import Path
@@ -28,6 +30,14 @@ from .benchmark import (
 DEFAULT_FRAME_MIN_DEGREES = [round(index * 0.05, 2) for index in range(21)]
 DEFAULT_BOX_MARGINS_PX = [0.0, 5.0, 10.0]
 DEFAULT_MULTIVIEW_MIN_SCORES = [round(index * 0.05, 2) for index in range(21)]
+
+
+@dataclass(frozen=True, slots=True)
+class _SweepEvaluationJob:
+    frame_min_degree: float
+    box_margin_px: float
+    video_prediction_source: str
+    multiview_min_score: float | None
 
 SWEEP_CSV_FIELDS = [
     "frame_min_degree",
@@ -118,6 +128,7 @@ def run_cadica_threshold_sweep(
     box_margins_px: list[float] | None = None,
     video_prediction_sources: list[str] | None = None,
     multiview_min_scores: list[float] | None = None,
+    workers: int = 1,
 ) -> dict[str, Path]:
     resolved_manifest = Path(manifest)
     resolved_frame_root = Path(frame_results_root)
@@ -136,6 +147,7 @@ def run_cadica_threshold_sweep(
     )
     resolved_sources = _resolve_video_prediction_sources(video_prediction_sources, resolved_temporal_root)
     resolved_multiview_min_scores = _resolve_multiview_min_scores(multiview_min_scores, resolved_multiview_root)
+    resolved_workers = _resolve_workers(workers)
 
     _validate_inputs(resolved_manifest, resolved_frame_root, resolved_temporal_root, resolved_multiview_root)
     resolved_output_root.mkdir(parents=True, exist_ok=True)
@@ -143,51 +155,23 @@ def run_cadica_threshold_sweep(
     manifest_frames = load_cadica_manifest(resolved_manifest)
     frame_predictions = _index_frame_predictions(resolved_frame_root)
 
-    sweep_rows: list[dict[str, Any]] = []
-    for frame_min_degree, box_margin_px in itertools.product(resolved_frame_min_degrees, resolved_box_margins):
-        frame_rows, box_rows, _unmatched_point_rows = _evaluate_frames(
-            manifest_frames,
-            frame_predictions,
-            frame_min_degree=frame_min_degree,
-            box_margin_px=box_margin_px,
-        )
-        for video_prediction_source, multiview_min_score in itertools.product(
-            resolved_sources,
-            resolved_multiview_min_scores,
-        ):
-            video_rows = _build_video_rows(
-                frame_rows,
-                temporal_results_root=resolved_temporal_root,
-                video_prediction_source=video_prediction_source,
-            )
-            patient_rows = _build_patient_rows(video_rows)
-            multiview_patient_rows, multiview_side_rows, multiview_score_rule = _build_multiview_rows(
-                manifest_frames,
-                multiview_results_root=resolved_multiview_root,
-                multiview_min_score=0.0 if multiview_min_score is None else multiview_min_score,
-            )
-            summary = _build_summary(
-                frame_rows,
-                box_rows,
-                video_rows,
-                patient_rows,
-                multiview_patient_rows,
-                multiview_side_rows,
-                manifest=resolved_manifest,
-                frame_results_root=resolved_frame_root,
-                output_root=resolved_output_root,
-                temporal_results_root=resolved_temporal_root,
-                multiview_results_root=resolved_multiview_root,
-                frame_min_degree=frame_min_degree,
-                box_margin_px=box_margin_px,
-                video_prediction_source=video_prediction_source,
-                multiview_min_score=0.0 if multiview_min_score is None else multiview_min_score,
-                multiview_score_rule=multiview_score_rule,
-                write_review_images=False,
-                max_review_images=0,
-                review_image_root=None,
-            )
-            sweep_rows.append(_sweep_row_from_summary(summary, multiview_min_score=multiview_min_score))
+    jobs = _build_sweep_jobs(
+        frame_min_degrees=resolved_frame_min_degrees,
+        box_margins_px=resolved_box_margins,
+        video_prediction_sources=resolved_sources,
+        multiview_min_scores=resolved_multiview_min_scores,
+    )
+    sweep_rows = _evaluate_sweep_jobs(
+        jobs,
+        manifest=resolved_manifest,
+        frame_results_root=resolved_frame_root,
+        output_root=resolved_output_root,
+        temporal_results_root=resolved_temporal_root,
+        multiview_results_root=resolved_multiview_root,
+        manifest_frames=manifest_frames,
+        frame_predictions=frame_predictions,
+        workers=resolved_workers,
+    )
 
     csv_path = resolved_output_root / "cadica_threshold_sweep.csv"
     summary_path = resolved_output_root / "cadica_threshold_sweep_summary.json"
@@ -215,6 +199,7 @@ def run_cadica_threshold_sweep(
             video_prediction_sources=resolved_sources,
             multiview_min_scores=resolved_multiview_min_scores,
             multiview_row_paths=multiview_row_paths,
+            workers=resolved_workers,
         ),
     )
     outputs = {
@@ -223,6 +208,130 @@ def run_cadica_threshold_sweep(
     }
     outputs.update(multiview_row_paths)
     return outputs
+
+
+def _evaluate_sweep_jobs(
+    jobs: list[_SweepEvaluationJob],
+    *,
+    manifest: Path,
+    frame_results_root: Path,
+    output_root: Path,
+    temporal_results_root: Path | None,
+    multiview_results_root: Path | None,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+    workers: int,
+) -> list[dict[str, Any]]:
+    if workers == 1 or len(jobs) <= 1:
+        return [
+            _evaluate_sweep_job(
+                job,
+                manifest=manifest,
+                frame_results_root=frame_results_root,
+                output_root=output_root,
+                temporal_results_root=temporal_results_root,
+                multiview_results_root=multiview_results_root,
+                manifest_frames=manifest_frames,
+                frame_predictions=frame_predictions,
+            )
+            for job in jobs
+        ]
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        rows = list(
+            executor.map(
+                lambda job: _evaluate_sweep_job(
+                    job,
+                    manifest=manifest,
+                    frame_results_root=frame_results_root,
+                    output_root=output_root,
+                    temporal_results_root=temporal_results_root,
+                    multiview_results_root=multiview_results_root,
+                    manifest_frames=manifest_frames,
+                    frame_predictions=frame_predictions,
+                ),
+                jobs,
+            )
+        )
+    return rows
+
+
+def _evaluate_sweep_job(
+    job: _SweepEvaluationJob,
+    *,
+    manifest: Path,
+    frame_results_root: Path,
+    output_root: Path,
+    temporal_results_root: Path | None,
+    multiview_results_root: Path | None,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+) -> dict[str, Any]:
+    frame_rows, box_rows, _unmatched_point_rows = _evaluate_frames(
+        manifest_frames,
+        frame_predictions,
+        frame_min_degree=job.frame_min_degree,
+        box_margin_px=job.box_margin_px,
+    )
+    video_rows = _build_video_rows(
+        frame_rows,
+        temporal_results_root=temporal_results_root,
+        video_prediction_source=job.video_prediction_source,
+    )
+    patient_rows = _build_patient_rows(video_rows)
+    multiview_patient_rows, multiview_side_rows, multiview_score_rule = _build_multiview_rows(
+        manifest_frames,
+        multiview_results_root=multiview_results_root,
+        multiview_min_score=0.0 if job.multiview_min_score is None else job.multiview_min_score,
+    )
+    summary = _build_summary(
+        frame_rows,
+        box_rows,
+        video_rows,
+        patient_rows,
+        multiview_patient_rows,
+        multiview_side_rows,
+        manifest=manifest,
+        frame_results_root=frame_results_root,
+        output_root=output_root,
+        temporal_results_root=temporal_results_root,
+        multiview_results_root=multiview_results_root,
+        frame_min_degree=job.frame_min_degree,
+        box_margin_px=job.box_margin_px,
+        video_prediction_source=job.video_prediction_source,
+        multiview_min_score=0.0 if job.multiview_min_score is None else job.multiview_min_score,
+        multiview_score_rule=multiview_score_rule,
+        write_review_images=False,
+        max_review_images=0,
+        review_image_root=None,
+    )
+    return _sweep_row_from_summary(summary, multiview_min_score=job.multiview_min_score)
+
+
+def _build_sweep_jobs(
+    *,
+    frame_min_degrees: list[float],
+    box_margins_px: list[float],
+    video_prediction_sources: list[str],
+    multiview_min_scores: list[float | None],
+) -> list[_SweepEvaluationJob]:
+    jobs: list[_SweepEvaluationJob] = []
+    combinations = itertools.product(
+        frame_min_degrees,
+        box_margins_px,
+        video_prediction_sources,
+        multiview_min_scores,
+    )
+    for frame_min_degree, box_margin_px, video_prediction_source, multiview_min_score in combinations:
+        jobs.append(
+            _SweepEvaluationJob(
+                frame_min_degree=frame_min_degree,
+                box_margin_px=box_margin_px,
+                video_prediction_source=video_prediction_source,
+                multiview_min_score=multiview_min_score,
+            )
+        )
+    return jobs
 
 
 def parse_float_list(value: str) -> list[float]:
@@ -289,6 +398,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="multiview_min_scores",
         help="Comma-separated multi-view score thresholds. Defaults to 0.0 through 1.0 in 0.05 steps when multi-view results are supplied.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker threads used to evaluate sweep combinations. Defaults to 1.",
+    )
     return parser
 
 
@@ -312,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
             multiview_min_scores=(
                 None if args.multiview_min_scores is None else parse_float_list(args.multiview_min_scores)
             ),
+            workers=args.workers,
         )
     except (FileNotFoundError, NotADirectoryError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"CADICA threshold sweep failed: {exc}", file=sys.stderr)
@@ -330,6 +446,12 @@ def _resolve_float_values(values: list[float] | None, *, default: list[float], n
     if negative_values:
         raise ValueError(f"{name} values must be >= 0, got {negative_values}.")
     return resolved
+
+
+def _resolve_workers(workers: int) -> int:
+    if workers < 1:
+        raise ValueError("workers must be >= 1.")
+    return workers
 
 
 def _resolve_video_prediction_sources(
@@ -505,6 +627,7 @@ def _build_sweep_summary(
     video_prediction_sources: list[str],
     multiview_min_scores: list[float | None],
     multiview_row_paths: dict[str, Path],
+    workers: int,
 ) -> dict[str, Any]:
     best_frame_f1 = _best_metric(rows, "frame_F1")
     best_video_f1 = _best_metric(rows, "video_F1")
@@ -523,6 +646,7 @@ def _build_sweep_summary(
             "box_margins_px": box_margins_px,
             "video_prediction_sources": video_prediction_sources,
             "multiview_min_scores": multiview_min_scores,
+            "workers": workers,
             "multiview_prediction_rule": (
                 "predicted positive when lesion is present and score >= threshold; "
                 "if a result lacks an explicit lesion-present field, score >= threshold is used"

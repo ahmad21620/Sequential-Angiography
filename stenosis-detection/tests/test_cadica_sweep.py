@@ -29,6 +29,7 @@ class CadicaThresholdSweepTests(unittest.TestCase):
                 output_root=output_root,
                 frame_min_degrees=[0.0, 0.5],
                 box_margins_px=[0.0, 5.0],
+                workers=2,
             )
 
             self.assertTrue(outputs["cadica_threshold_sweep_csv"].is_file())
@@ -37,6 +38,7 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             summary = json.loads((output_root / "cadica_threshold_sweep_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(len(rows), 4)
             self.assertEqual(summary["evaluated_sweep_combinations"], 4)
+            self.assertEqual(summary["config"]["workers"], 2)
 
     def test_thresholds_and_box_margins_change_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -96,6 +98,19 @@ class CadicaThresholdSweepTests(unittest.TestCase):
                     frame_results_root=frame_results_root,
                     output_root=temp_root / "sweep",
                     video_prediction_sources=["temporal_final"],
+                )
+
+    def test_workers_must_be_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path, frame_results_root = self._write_synthetic_dataset(temp_root)
+
+            with self.assertRaisesRegex(ValueError, "workers must be >= 1"):
+                run_cadica_threshold_sweep(
+                    manifest=manifest_path,
+                    frame_results_root=frame_results_root,
+                    output_root=temp_root / "sweep",
+                    workers=0,
                 )
 
     def test_summary_selects_best_frame_f1(self) -> None:
