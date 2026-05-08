@@ -95,6 +95,14 @@ FINAL_CASE_FIELDS = (
     "distinct_supporting_view_count",
     "source_path",
 )
+STAGE_PROGRESSION_FIELDS = (
+    "Stage",
+    "Recall",
+    "Specificity",
+    "Precision",
+    "F1",
+    "Balanced Accuracy",
+)
 
 
 class SweepReportError(RuntimeError):
@@ -227,7 +235,9 @@ def run_sweep_report(
     best_by_level = _best_by_level(variants)
     pareto_multiview = pareto_front(multiview_variants)
     sensitivity_rows = metric_sensitivity(multiview_variants)
+    stage_progression = _stage_progression_for_selected_variant(variants, best_multiview)
     warnings = build_warnings(multiview_variants, best_multiview)
+    warnings.extend(_stage_progression_warnings(stage_progression, best_multiview))
 
     table_paths = {
         "all_variant_metrics": tables_root / "all_variant_metrics.csv",
@@ -236,6 +246,7 @@ def run_sweep_report(
         "pareto_multiview_variants": tables_root / "pareto_multiview_variants.csv",
         "metric_sensitivity": tables_root / "metric_sensitivity.csv",
         "final_selected_variant_cases": tables_root / "final_selected_variant_cases.csv",
+        "stage_progression_metrics": tables_root / "stage_progression_metrics.csv",
     }
     _write_csv(table_paths["all_variant_metrics"], [variant.to_table_row() for variant in variants], ALL_VARIANT_FIELDS)
     _write_csv(table_paths["top_multiview_variants"], [variant.to_table_row() for variant in top_multiview], ALL_VARIANT_FIELDS)
@@ -246,6 +257,14 @@ def run_sweep_report(
         ALL_VARIANT_FIELDS,
     )
     _write_csv(table_paths["metric_sensitivity"], sensitivity_rows, SENSITIVITY_FIELDS)
+    _write_csv(
+        table_paths["stage_progression_metrics"],
+        [
+            _stage_progression_row(variant, _stage_display_name(variant.level))
+            for variant in stage_progression
+        ],
+        STAGE_PROGRESSION_FIELDS,
+    )
 
     if not write_final_selected_variant_cases(best_multiview, table_paths["final_selected_variant_cases"]):
         warnings.append(
@@ -256,7 +275,7 @@ def run_sweep_report(
         "top_multiview_f1": plots_root / "01_top_multiview_f1.png",
         "precision_recall_scatter": plots_root / "02_multiview_precision_recall_scatter.png",
         "confusion_matrix": plots_root / "03_best_multiview_confusion_matrix.png",
-        "best_by_level_comparison": plots_root / "04_best_by_level_comparison.png",
+        "stage_progression_metrics": plots_root / "04_stage_progression_metrics.png",
         "temporal_parameter_heatmap": plots_root / "05_temporal_parameter_heatmap.png",
         "frame_threshold_heatmap": plots_root / "06_frame_threshold_heatmap.png",
         "radius_parameter_heatmap": plots_root / "07_radius_parameter_heatmap.png",
@@ -269,7 +288,7 @@ def run_sweep_report(
         plot_paths["precision_recall_scatter"],
     )
     plot_confusion_matrix(best_multiview, plot_paths["confusion_matrix"])
-    plot_best_by_level(best_by_level, plot_paths["best_by_level_comparison"])
+    plot_stage_progression_metrics(stage_progression, plot_paths["stage_progression_metrics"])
     plot_heatmap(
         multiview_variants,
         x_param="min_persistence_ratio",
@@ -306,6 +325,7 @@ def run_sweep_report(
         variants=variants,
         best_multiview=best_multiview,
         best_by_level=best_by_level,
+        stage_progression=stage_progression,
         benchmark_overview=benchmark_overview,
         table_paths=table_paths,
         plot_paths=plot_paths,
@@ -322,7 +342,7 @@ def run_sweep_report(
         best_multiview=best_multiview,
         top_multiview=top_multiview[:10],
         pareto_multiview=pareto_multiview,
-        best_by_level=best_by_level,
+        stage_progression=stage_progression,
         sensitivity_rows=sensitivity_rows,
         benchmark_overview=benchmark_overview,
         table_paths=table_paths,
@@ -335,7 +355,7 @@ def run_sweep_report(
         best_multiview=best_multiview,
         top_multiview=top_multiview[:10],
         pareto_multiview=pareto_multiview,
-        best_by_level=best_by_level,
+        stage_progression=stage_progression,
         sensitivity_rows=sensitivity_rows,
         benchmark_overview=benchmark_overview,
         table_paths=table_paths,
@@ -472,6 +492,73 @@ def pareto_front(variants: Iterable[VariantMetric]) -> list[VariantMetric]:
         if not dominated:
             front.append(candidate)
     return rank_variants(front)
+
+
+def _stage_progression_for_selected_variant(
+    variants: list[VariantMetric],
+    best_multiview: VariantMetric,
+) -> list[VariantMetric]:
+    progression: list[VariantMetric] = []
+    frame_row = next(
+        (
+            variant
+            for variant in variants
+            if variant.level == "frame" and variant.frame_variant == best_multiview.frame_variant
+        ),
+        None,
+    )
+    if frame_row is not None:
+        progression.append(frame_row)
+
+    temporal_row = next(
+        (
+            variant
+            for variant in variants
+            if variant.level == "temporal"
+            and variant.frame_variant == best_multiview.frame_variant
+            and variant.temporal_variant == best_multiview.temporal_variant
+        ),
+        None,
+    )
+    if temporal_row is not None:
+        progression.append(temporal_row)
+
+    progression.append(best_multiview)
+    return progression
+
+
+def _stage_progression_row(variant: VariantMetric, display_stage: str) -> dict[str, Any]:
+    return {
+        "Stage": display_stage,
+        "Recall": _format_percentage(variant.metric("recall")),
+        "Specificity": _format_percentage(variant.metric("specificity")),
+        "Precision": _format_percentage(variant.metric("precision")),
+        "F1": _format_percentage(variant.metric("f1")),
+        "Balanced Accuracy": _format_percentage(variant.metric("balanced_accuracy")),
+    }
+
+
+def _stage_progression_summary_row(variant: VariantMetric, display_stage: str) -> dict[str, Any]:
+    return {
+        "stage": display_stage,
+        "level": variant.level,
+        "frame_variant": variant.frame_variant,
+        "temporal_variant": variant.temporal_variant,
+        "recall": variant.metric("recall"),
+        "specificity": variant.metric("specificity"),
+        "precision": variant.metric("precision"),
+        "f1": variant.metric("f1"),
+        "balanced_accuracy": variant.metric("balanced_accuracy"),
+        "recall_percent": _format_percentage(variant.metric("recall")),
+        "specificity_percent": _format_percentage(variant.metric("specificity")),
+        "precision_percent": _format_percentage(variant.metric("precision")),
+        "f1_percent": _format_percentage(variant.metric("f1")),
+        "balanced_accuracy_percent": _format_percentage(variant.metric("balanced_accuracy")),
+    }
+
+
+def _stage_progression_columns() -> tuple[str, ...]:
+    return STAGE_PROGRESSION_FIELDS
 
 
 def metric_sensitivity(variants: Iterable[VariantMetric]) -> list[dict[str, Any]]:
@@ -680,25 +767,32 @@ def plot_confusion_matrix(variant: VariantMetric, output_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_best_by_level(variants: list[VariantMetric], output_path: Path) -> None:
+def plot_stage_progression_metrics(variants: list[VariantMetric], output_path: Path) -> None:
     if not variants:
-        _plot_empty(output_path, "No Stage Comparison Data")
+        _plot_empty(output_path, "No Stage Progression Data")
         return
-    levels = [variant.level.title() for variant in variants]
-    metrics = ("precision", "recall", "f1")
+    levels = [_stage_display_name(variant.level) for variant in variants]
+    metrics = ("recall", "specificity", "precision", "f1", "balanced_accuracy")
     x_positions = np.arange(len(levels))
-    width = 0.23
-    fig, ax = plt.subplots(figsize=(8.5, 5.5))
-    colors = ("#2a9d8f", "#e9c46a", "#e76f51")
+    width = 0.15
+    fig, ax = plt.subplots(figsize=(10.5, 5.8))
+    colors = ("#2a9d8f", "#457b9d", "#e9c46a", "#e76f51", "#6d597a")
     for index, metric in enumerate(metrics):
-        values = [_safe_float(variant.metric(metric)) for variant in variants]
-        ax.bar(x_positions + (index - 1) * width, values, width, label=metric.title(), color=colors[index])
+        values = [_safe_float(variant.metric(metric)) * 100.0 for variant in variants]
+        ax.bar(
+            x_positions + (index - 2) * width,
+            values,
+            width,
+            label=_metric_display_name(metric),
+            color=colors[index],
+        )
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(levels)
-    ax.set_ylim(0, 1.05)
+    ax.set_xticklabels(levels, rotation=0)
+    ax.set_ylim(0, 100)
     ax.set_ylabel("Metric Value")
-    ax.set_title("Best Variant By Stage (Final Result Is Multi-View)")
-    ax.legend()
+    ax.set_title("Selected Pipeline Stage Progression")
+    ax.yaxis.set_major_formatter(lambda value, _position: f"{value:.0f}%")
+    ax.legend(ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.10))
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path, dpi=220)
@@ -760,7 +854,7 @@ def write_markdown_report(
     best_multiview: VariantMetric,
     top_multiview: list[VariantMetric],
     pareto_multiview: list[VariantMetric],
-    best_by_level: list[VariantMetric],
+    stage_progression: list[VariantMetric],
     sensitivity_rows: list[dict[str, Any]],
     benchmark_overview: dict[str, Any],
     table_paths: dict[str, Path],
@@ -786,8 +880,6 @@ def write_markdown_report(
         "",
         _markdown_table([_best_result_row(best_multiview)], _best_result_columns()),
         "",
-        f"![Best multi-view confusion matrix]({_relative_path(plot_paths['confusion_matrix'], output_root)})",
-        "",
         f"![Multi-view precision/recall scatter]({_relative_path(plot_paths['precision_recall_scatter'], output_root)})",
         "",
         "## 3. Top multi-view variants",
@@ -802,13 +894,23 @@ def write_markdown_report(
         "",
         f"Scatter plot: [{_relative_path(plot_paths['precision_recall_scatter'], output_root)}]({_relative_path(plot_paths['precision_recall_scatter'], output_root)})",
         "",
-        "## 5. Stage comparison",
+        "## 5. Stage progression",
         "",
-        "Multi-view is the final case-level result. Frame and temporal rows are included only as stage comparisons.",
+        "This table follows the same selected final pipeline across frame-level detection, temporal fusion, and multi-view/case fusion. This is different from selecting the best independent variant at each stage.",
         "",
-        _markdown_table([_compact_metric_row(variant) for variant in best_by_level], _compact_metric_columns()),
+        _markdown_table(
+            [
+                _stage_progression_row(variant, _stage_display_name(variant.level))
+                for variant in stage_progression
+            ],
+            _stage_progression_columns(),
+        ),
         "",
-        f"![Stage comparison]({_relative_path(plot_paths['best_by_level_comparison'], output_root)})",
+        f"![Stage progression]({_relative_path(plot_paths['stage_progression_metrics'], output_root)})",
+        "",
+        "Best independent variant by stage is still written to CSV for debugging, but it is not the main progression table.",
+        "",
+        f"Debug CSV: [{_relative_path(table_paths['best_by_level'], output_root)}]({_relative_path(table_paths['best_by_level'], output_root)})",
         "",
         "## 6. Parameter sensitivity",
         "",
@@ -833,7 +935,7 @@ def write_html_report(
     best_multiview: VariantMetric,
     top_multiview: list[VariantMetric],
     pareto_multiview: list[VariantMetric],
-    best_by_level: list[VariantMetric],
+    stage_progression: list[VariantMetric],
     sensitivity_rows: list[dict[str, Any]],
     benchmark_overview: dict[str, Any],
     table_paths: dict[str, Path],
@@ -853,7 +955,6 @@ def write_html_report(
             f"<p>{html.escape(_job_summary_sentence(benchmark_overview))}</p>",
             "<h2>2. Best Final Multi-View Result</h2>",
             _html_table([_best_result_row(best_multiview)], _best_result_columns()),
-            _html_image(plot_paths["confusion_matrix"], output_root, "Best multi-view confusion matrix"),
             _html_image(plot_paths["precision_recall_scatter"], output_root, "Multi-view precision/recall scatter"),
             "<h2>3. Top Multi-View Variants</h2>",
             _html_table([_compact_metric_row(variant) for variant in top_multiview], _compact_metric_columns()),
@@ -861,10 +962,18 @@ def write_html_report(
             "<h2>4. Precision/Recall Tradeoff</h2>",
             _html_table([_compact_metric_row(variant) for variant in pareto_multiview[:10]], _compact_metric_columns()),
             _html_link(plot_paths["precision_recall_scatter"], output_root, "Scatter plot"),
-            "<h2>5. Stage Comparison</h2>",
-            "<p>Multi-view is the final case-level result. Frame and temporal rows are included only as stage comparisons.</p>",
-            _html_table([_compact_metric_row(variant) for variant in best_by_level], _compact_metric_columns()),
-            _html_image(plot_paths["best_by_level_comparison"], output_root, "Stage comparison"),
+            "<h2>5. Stage Progression</h2>",
+            "<p>This table follows the same selected final pipeline across frame-level detection, temporal fusion, and multi-view/case fusion. This is different from selecting the best independent variant at each stage.</p>",
+            _html_table(
+                [
+                    _stage_progression_row(variant, _stage_display_name(variant.level))
+                    for variant in stage_progression
+                ],
+                _stage_progression_columns(),
+            ),
+            _html_image(plot_paths["stage_progression_metrics"], output_root, "Stage progression"),
+            "<p>Best independent variant by stage is still written to CSV for debugging, but it is not the main progression table.</p>",
+            _html_link(table_paths["best_by_level"], output_root, "Debug CSV"),
             "<h2>6. Parameter Sensitivity</h2>",
             f"<p>{html.escape(_sensitivity_summary(sensitivity_rows))}</p>",
             "<ul>",
@@ -908,6 +1017,7 @@ def build_summary_payload(
     variants: list[VariantMetric],
     best_multiview: VariantMetric,
     best_by_level: list[VariantMetric],
+    stage_progression: list[VariantMetric],
     benchmark_overview: dict[str, Any],
     table_paths: dict[str, Path],
     plot_paths: dict[str, Path],
@@ -925,6 +1035,10 @@ def build_summary_payload(
         "benchmark_jobs": benchmark_overview,
         "best_multiview": best_multiview.to_table_row(),
         "best_by_level": [variant.to_table_row() for variant in best_by_level],
+        "stage_progression": [
+            _stage_progression_summary_row(variant, _stage_display_name(variant.level))
+            for variant in stage_progression
+        ],
         "warnings": warnings,
         "tables": {name: str(path) for name, path in table_paths.items()},
         "plots": {name: str(path) for name, path in plot_paths.items()},
@@ -1160,6 +1274,44 @@ def _best_by_level(variants: list[VariantMetric]) -> list[VariantMetric]:
     return best
 
 
+def _stage_progression_warnings(
+    stage_progression: list[VariantMetric],
+    best_multiview: VariantMetric,
+) -> list[str]:
+    present_levels = {variant.level for variant in stage_progression}
+    warnings: list[str] = []
+    if "frame" not in present_levels:
+        warnings.append(
+            f"Stage progression is missing the frame-level row for frame_variant={best_multiview.frame_variant}."
+        )
+    if "temporal" not in present_levels:
+        warnings.append(
+            "Stage progression is missing the temporal-fusion row for "
+            f"frame_variant={best_multiview.frame_variant}, temporal_variant={best_multiview.temporal_variant}."
+        )
+    return warnings
+
+
+def _stage_display_name(level: str) -> str:
+    if level == "frame":
+        return "Frame level"
+    if level == "temporal":
+        return "Temporal fusion"
+    if level == "multiview":
+        return "Multi-view fusion / case level"
+    return level
+
+
+def _metric_display_name(metric: str) -> str:
+    return {
+        "recall": "Recall",
+        "specificity": "Specificity",
+        "precision": "Precision",
+        "f1": "F1",
+        "balanced_accuracy": "Balanced Accuracy",
+    }.get(metric, metric.replace("_", " ").title())
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: Iterable[str]) -> None:
     field_list = list(fieldnames)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1230,6 +1382,13 @@ def _format_metric(value: Any) -> str:
     return f"{float(numeric):.3f}"
 
 
+def _format_percentage(value: Any) -> str:
+    numeric = _coerce_metric(value)
+    if numeric is None:
+        return "n/a"
+    return f"{float(numeric) * 100:.0f}%"
+
+
 def _plot_empty(output_path: Path, title: str) -> None:
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     ax.text(0.5, 0.5, "No data available", ha="center", va="center", fontsize=14)
@@ -1257,36 +1416,35 @@ def _best_result_columns() -> tuple[str, ...]:
     return (
         *FRAME_PARAMS,
         *TEMPORAL_PARAMS,
-        "TP",
-        "FP",
-        "TN",
-        "FN",
-        "precision",
-        "recall",
-        "f1",
-        "specificity",
-        "balanced_accuracy",
-        "total_evaluated",
+        "Recall",
+        "Specificity",
+        "Precision",
+        "F1",
+        "Balanced Accuracy",
     )
 
 
 def _best_result_row(variant: VariantMetric) -> dict[str, Any]:
     row = variant.to_table_row()
-    return {column: row.get(column) for column in _best_result_columns()}
+    return {
+        **{column: row.get(column) for column in (*FRAME_PARAMS, *TEMPORAL_PARAMS)},
+        "Recall": _format_percentage(variant.metric("recall")),
+        "Specificity": _format_percentage(variant.metric("specificity")),
+        "Precision": _format_percentage(variant.metric("precision")),
+        "F1": _format_percentage(variant.metric("f1")),
+        "Balanced Accuracy": _format_percentage(variant.metric("balanced_accuracy")),
+    }
 
 
 def _compact_metric_columns() -> tuple[str, ...]:
     return (
         "level",
         "variant",
-        "precision",
-        "recall",
-        "f1",
-        "balanced_accuracy",
-        "TP",
-        "FP",
-        "TN",
-        "FN",
+        "Recall",
+        "Specificity",
+        "Precision",
+        "F1",
+        "Balanced Accuracy",
     )
 
 
@@ -1294,14 +1452,11 @@ def _compact_metric_row(variant: VariantMetric) -> dict[str, Any]:
     return {
         "level": variant.level,
         "variant": _compact_variant_label(variant),
-        "precision": _format_metric(variant.metric("precision")),
-        "recall": _format_metric(variant.metric("recall")),
-        "f1": _format_metric(variant.metric("f1")),
-        "balanced_accuracy": _format_metric(variant.metric("balanced_accuracy")),
-        "TP": variant.metric("TP"),
-        "FP": variant.metric("FP"),
-        "TN": variant.metric("TN"),
-        "FN": variant.metric("FN"),
+        "Recall": _format_percentage(variant.metric("recall")),
+        "Specificity": _format_percentage(variant.metric("specificity")),
+        "Precision": _format_percentage(variant.metric("precision")),
+        "F1": _format_percentage(variant.metric("f1")),
+        "Balanced Accuracy": _format_percentage(variant.metric("balanced_accuracy")),
     }
 
 

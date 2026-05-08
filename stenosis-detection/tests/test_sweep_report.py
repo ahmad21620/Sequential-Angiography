@@ -74,7 +74,14 @@ class SweepReportTests(unittest.TestCase):
                 "__stenosis_threshold_0p25"
                 "__average_radius_threshold_4"
             )
+            independent_frame_variant = (
+                "radius_outside_fraction_threshold_0p2"
+                "__radius_min_outside_samples_4"
+                "__stenosis_threshold_0p3"
+                "__average_radius_threshold_5"
+            )
             temporal_variant = "min_supporting_frames_2__min_persistence_ratio_0p2"
+            independent_temporal_variant = "min_supporting_frames_3__min_persistence_ratio_0p4"
             sweep_root.mkdir()
 
             self._write_summary(
@@ -85,11 +92,29 @@ class SweepReportTests(unittest.TestCase):
                 fn=0,
             )
             self._write_summary(
+                benchmark_root / "frame" / independent_frame_variant / "frame_summary.json",
+                tp=2,
+                fp=0,
+                tn=2,
+                fn=0,
+            )
+            self._write_summary(
                 benchmark_root / "temporal" / frame_variant / temporal_variant / "temporal_sequence_summary.json",
                 tp=1,
                 fp=0,
                 tn=1,
                 fn=1,
+            )
+            self._write_summary(
+                benchmark_root
+                / "temporal"
+                / independent_frame_variant
+                / independent_temporal_variant
+                / "temporal_sequence_summary.json",
+                tp=2,
+                fp=0,
+                tn=2,
+                fn=0,
             )
             multiview_root = benchmark_root / "multiview" / frame_variant / temporal_variant
             self._write_summary(
@@ -111,13 +136,37 @@ class SweepReportTests(unittest.TestCase):
             self.assertTrue(artifacts.reports["html"].is_file())
             self.assertTrue(artifacts.reports["summary_json"].is_file())
             self.assertTrue((output_root / "plots" / "02_multiview_precision_recall_scatter.png").is_file())
+            self.assertTrue((output_root / "plots" / "04_stage_progression_metrics.png").is_file())
+            self.assertTrue((output_root / "tables" / "stage_progression_metrics.csv").is_file())
             all_rows = self._read_csv(output_root / "tables" / "all_variant_metrics.csv")
             case_rows = self._read_csv(output_root / "tables" / "final_selected_variant_cases.csv")
-            self.assertEqual(len(all_rows), 3)
+            stage_rows = self._read_csv(output_root / "tables" / "stage_progression_metrics.csv")
+            summary_payload = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+            report_text = artifacts.reports["markdown"].read_text(encoding="utf-8")
+            stage_section = report_text.split("## 5. Stage progression", 1)[1].split("## 6.", 1)[0]
+            self.assertEqual(len(all_rows), 5)
             self.assertEqual(len(case_rows), 2)
+            self.assertEqual([row["Stage"] for row in stage_rows], [
+                "Frame level",
+                "Temporal fusion",
+                "Multi-view fusion / case level",
+            ])
             self.assertIn("selected_side", case_rows[0])
             self.assertNotIn("final_severity", case_rows[0])
-            self.assertNotIn("severity agreement", artifacts.reports["markdown"].read_text(encoding="utf-8").lower())
+            self.assertIn("Stage progression", report_text)
+            self.assertIn("67%", stage_section)
+            self.assertIn("100%", stage_section)
+            for forbidden in ("TP", "FP", "TN", "FN", "total_evaluated", "positive_labels", "negative_labels"):
+                self.assertNotIn(forbidden, stage_section)
+            self.assertNotIn("severity agreement", report_text.lower())
+            self.assertEqual(
+                [row["frame_variant"] for row in summary_payload["stage_progression"]],
+                [frame_variant, frame_variant, frame_variant],
+            )
+            self.assertEqual(
+                summary_payload["stage_progression"][1]["temporal_variant"],
+                temporal_variant,
+            )
 
     def _variant(
         self,
