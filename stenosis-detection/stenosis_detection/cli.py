@@ -83,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-imgsz", type=int, default=1024, help="YOLO inference image size.")
     parser.add_argument("--yolo-conf", type=float, default=0.25, help="YOLO confidence threshold.")
     parser.add_argument("--yolo-iou", type=float, default=0.7, help="YOLO NMS IoU threshold.")
+    parser.add_argument("--yolo-batch-size", type=int, default=1, help="YOLO inference batch size. Use --workers 1 for GPU.")
     parser.add_argument("--device", help="Device string passed to Ultralytics when --detector yolo.")
 
     parser.add_argument("--mask-threshold", type=int, default=defaults.mask_threshold, help="Threshold used to binarize vessel masks.")
@@ -274,6 +275,8 @@ def _validate_yolo_options(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--yolo-conf must be in the range [0.0, 1.0].")
     if not 0.0 <= args.yolo_iou <= 1.0:
         parser.error("--yolo-iou must be in the range [0.0, 1.0].")
+    if args.yolo_batch_size < 1:
+        parser.error("--yolo-batch-size must be at least 1.")
 
 
 def _run_yolo_batch(args: argparse.Namespace) -> int:
@@ -290,6 +293,7 @@ def _run_yolo_batch(args: argparse.Namespace) -> int:
             iou=args.yolo_iou,
             device=args.device,
             mask_threshold=args.mask_threshold,
+            batch_size=args.yolo_batch_size,
         ),
         skip_existing=not args.overwrite,
         workers=args.workers,
@@ -299,6 +303,7 @@ def _run_yolo_batch(args: argparse.Namespace) -> int:
     print("YOLO stenosis detection completed.")
     print(f"Total frames discovered: {summary.total_jobs}")
     print(f"Workers: {summary.workers}")
+    print(f"Batch size: {args.yolo_batch_size}")
     print(f"Review images: {'yes' if args.save_review_images else 'no'}")
     print(f"Processed: {summary.processed}")
     print(f"Skipped existing: {summary.skipped_existing}")

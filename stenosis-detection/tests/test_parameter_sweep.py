@@ -67,6 +67,7 @@ class ParameterSweepTests(unittest.TestCase):
             yolo_iou_thresholds=[0.50, 0.70],
             yolo_imgsz_values=[1024],
             device="0",
+            batch_size=8,
         )
 
         self.assertEqual(len(variants), 4)
@@ -75,6 +76,7 @@ class ParameterSweepTests(unittest.TestCase):
             [variant.name for variant in variants],
         )
         self.assertTrue(all(variant.detector == "yolo" for variant in variants))
+        self.assertTrue(all(variant.config.batch_size == 8 for variant in variants))
 
     def test_vessel_sweep_requires_masks_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -119,6 +121,7 @@ class ParameterSweepTests(unittest.TestCase):
                     write_temporal_images=False,
                     workers=1,
                     temporal_workers=1,
+                    yolo_batch_size=4,
                 )
             finally:
                 parameter_sweep_module.process_yolo_tree = original_process_yolo_tree
@@ -158,6 +161,7 @@ class ParameterSweepTests(unittest.TestCase):
             self.assertEqual(result.multiview_summary.failed_cases, 0)
             self.assertEqual(calls[0]["masks_root"], None)
             self.assertEqual(calls[0]["output_root"], output_root / "frame_results" / frame_variant)
+            self.assertEqual(calls[0]["batch_size"], 4)
 
             temporal_payload = json.loads(temporal_json.read_text(encoding="utf-8"))
             self.assertEqual(temporal_payload["view_id"], "case_a/view_01")
@@ -336,6 +340,7 @@ class ParameterSweepTests(unittest.TestCase):
                     "conf": config.conf,
                     "iou": config.iou,
                     "imgsz": config.imgsz,
+                    "batch_size": config.batch_size,
                 }
             )
             for job in jobs:

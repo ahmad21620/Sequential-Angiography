@@ -67,6 +67,7 @@ class YoloInferenceConfig:
     iou: float = 0.7
     device: str | None = None
     mask_threshold: int = 127
+    batch_size: int = 1
 
     def detector_metadata(self) -> YoloDetectorMetadata:
         return YoloDetectorMetadata(
@@ -133,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO confidence threshold.")
     parser.add_argument("--iou", type=float, default=0.7, help="YOLO NMS IoU threshold.")
     parser.add_argument("--device", help="Device string passed to Ultralytics, e.g. 0, cpu, or cuda.")
+    parser.add_argument("--batch-size", type=int, default=1, help="YOLO inference batch size. Use with --workers 1 for GPU.")
     parser.add_argument(
         "--workers",
         type=int,
@@ -180,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--conf must be in the range [0.0, 1.0].")
     if not 0.0 <= args.iou <= 1.0:
         parser.error("--iou must be in the range [0.0, 1.0].")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1.")
     if args.save_review_images and args.no_debug_images:
         parser.error("--save-review-images cannot be combined with --no-debug-images.")
 
@@ -197,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
                 iou=args.iou,
                 device=args.device,
                 mask_threshold=args.mask_threshold,
+                batch_size=args.batch_size,
             ),
             skip_existing=not args.overwrite,
             workers=args.workers,
@@ -209,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     print("YOLO stenosis detection completed.")
     print(f"Total frames discovered: {summary.total_jobs}")
     print(f"Workers: {summary.workers}")
+    print(f"Batch size: {args.batch_size}")
     print(f"Processed: {summary.processed}")
     print(f"Skipped existing: {summary.skipped_existing}")
     print(f"Failed: {summary.failed}")
@@ -274,20 +280,19 @@ def process_yolo_tree(
 
         if worker_count == 1:
             active_model = model if model is not None else load_yolo_model(config.weights)
-            for job in pending_jobs:
-                failure = _process_yolo_tree_job(
-                    job,
+            for batch_jobs in _batched(pending_jobs, config.batch_size):
+                batch_failures = _process_yolo_tree_batch(
+                    batch_jobs,
                     resolved_output_root,
                     config,
                     write_review_images=write_review_images,
                     model=active_model,
                 )
-                if failure is None:
-                    processed += 1
-                else:
+                processed += len(batch_jobs) - len(batch_failures)
+                for failure in batch_failures:
                     failures.append(failure)
-                    progress.write(f"Failed: {job.image_path} -> {failure.error}")
-                progress.update(1)
+                    progress.write(f"Failed: {failure.image_path} -> {failure.error}")
+                progress.update(len(batch_jobs))
                 progress.set_postfix(processed=processed, skipped=skipped_existing, failed=len(failures))
         elif pending_jobs:
             with ProcessPoolExecutor(max_workers=worker_count, initializer=_prepare_worker_process) as executor:
@@ -383,6 +388,73 @@ def run_yolo_frame_job(
     )
 
 
+def run_yolo_frame_batch_jobs(
+    jobs: list[YoloTreeJob],
+    *,
+    model: Any,
+    config: YoloInferenceConfig,
+) -> tuple[list[dict[str, Any]], list[YoloBatchFailure]]:
+    valid_jobs: list[YoloTreeJob] = []
+    image_shapes: dict[Path, tuple[int, int]] = {}
+    failures: list[YoloBatchFailure] = []
+
+    for job in jobs:
+        try:
+            image_bgr = _load_image_bgr(job.image_path)
+        except Exception as exc:
+            failures.append(YoloBatchFailure(image_path=str(job.image_path), error=str(exc)))
+            continue
+        image_height, image_width = image_bgr.shape[:2]
+        image_shapes[job.image_path] = (int(image_width), int(image_height))
+        valid_jobs.append(job)
+
+    if not valid_jobs:
+        return [], failures
+
+    try:
+        raw_results = _predict_batch(model, valid_jobs, config)
+    except Exception as exc:
+        failures.extend(YoloBatchFailure(image_path=str(job.image_path), error=str(exc)) for job in valid_jobs)
+        return [], failures
+
+    payloads: list[dict[str, Any]] = []
+    for index, job in enumerate(valid_jobs):
+        try:
+            image_width, image_height = image_shapes[job.image_path]
+            result = raw_results[index] if index < len(raw_results) else None
+            detections = _detections_from_result(
+                result,
+                image_width=image_width,
+                image_height=image_height,
+                model=model,
+            )
+            skeleton_points = (
+                []
+                if job.mask_path is None
+                else load_skeleton_points_from_mask(
+                    job.mask_path,
+                    image_width=image_width,
+                    image_height=image_height,
+                    mask_threshold=config.mask_threshold,
+                )
+            )
+            payloads.append(
+                build_yolo_frame_payload(
+                    image_path=job.image_path,
+                    mask_path=job.mask_path,
+                    detector=config.detector_metadata(),
+                    view_id=_view_id_from_relative_dir(job.relative_dir),
+                    image_width=image_width,
+                    image_height=image_height,
+                    detections=detections,
+                    skeleton_points_xy=skeleton_points,
+                )
+            )
+        except Exception as exc:
+            failures.append(YoloBatchFailure(image_path=str(job.image_path), error=str(exc)))
+    return payloads, failures
+
+
 def load_skeleton_points_from_mask(
     mask_path: str | Path,
     *,
@@ -469,6 +541,34 @@ def _process_yolo_tree_job(
     return None
 
 
+def _process_yolo_tree_batch(
+    jobs: list[YoloTreeJob],
+    output_root: Path,
+    config: YoloInferenceConfig,
+    write_review_images: bool = False,
+    model: Any | None = None,
+) -> list[YoloBatchFailure]:
+    try:
+        active_model = model if model is not None else load_yolo_model(config.weights)
+        payloads, failures = run_yolo_frame_batch_jobs(jobs, model=active_model, config=config)
+        failed_paths = {failure.image_path for failure in failures}
+        payload_index = 0
+        for job in jobs:
+            if str(job.image_path) in failed_paths:
+                continue
+            payload = payloads[payload_index]
+            payload_index += 1
+            output_dir = output_root / job.relative_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_paths = _build_output_paths(output_dir, job.image_stem)
+            output_paths["results_json"].write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if write_review_images:
+                save_review_image(job.image_path, output_paths["review_image"], payload)
+        return failures
+    except Exception as exc:  # pragma: no cover - protects long batch runs.
+        return [YoloBatchFailure(image_path=str(job.image_path), error=str(exc)) for job in jobs]
+
+
 def _predict(model: Any, image_path: Path, config: YoloInferenceConfig) -> list[Any]:
     kwargs = {
         "source": str(image_path),
@@ -476,6 +576,28 @@ def _predict(model: Any, image_path: Path, config: YoloInferenceConfig) -> list[
         "conf": config.conf,
         "iou": config.iou,
         "device": config.device,
+        "batch": config.batch_size,
+        "save": False,
+        "verbose": False,
+        "task": "detect",
+    }
+    compact_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+    results = model.predict(**compact_kwargs)
+    if results is None:
+        return []
+    if isinstance(results, list):
+        return results
+    return list(results)
+
+
+def _predict_batch(model: Any, jobs: list[YoloTreeJob], config: YoloInferenceConfig) -> list[Any]:
+    kwargs = {
+        "source": [str(job.image_path) for job in jobs],
+        "imgsz": config.imgsz,
+        "conf": config.conf,
+        "iou": config.iou,
+        "device": config.device,
+        "batch": config.batch_size,
         "save": False,
         "verbose": False,
         "task": "detect",
@@ -499,6 +621,23 @@ def _detections_from_results(
     if not results:
         return []
     result = results[0]
+    return _detections_from_result(
+        result,
+        image_width=image_width,
+        image_height=image_height,
+        model=model,
+    )
+
+
+def _detections_from_result(
+    result: Any,
+    *,
+    image_width: int,
+    image_height: int,
+    model: Any,
+) -> list[YoloDetection]:
+    if result is None:
+        return []
     boxes = getattr(result, "boxes", None)
     if boxes is None:
         return []
@@ -687,6 +826,12 @@ def _ensure_uint8(image: np.ndarray) -> np.ndarray:
     elif image_float.max(initial=0.0) > 255.0 or image_float.min(initial=0.0) < 0.0:
         image_float = cv2.normalize(image_float, None, 0, 255, cv2.NORM_MINMAX)
     return np.clip(np.round(image_float), 0, 255).astype(np.uint8)
+
+
+def _batched(items: list[YoloTreeJob], batch_size: int):
+    size = max(1, int(batch_size))
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 def _resolve_worker_count(workers: int) -> int:

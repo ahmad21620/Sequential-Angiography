@@ -231,6 +231,7 @@ def run_parameter_sweep(
     yolo_iou_thresholds: list[float] | None = None,
     yolo_imgsz_values: list[int] | None = None,
     yolo_device: str | None = None,
+    yolo_batch_size: int = 1,
     min_supporting_frames_values: list[int] | None = None,
     min_persistence_ratios: list[float] | None = None,
     base_config: PipelineConfig | None = None,
@@ -279,6 +280,7 @@ def run_parameter_sweep(
             yolo_iou_thresholds=yolo_iou_thresholds,
             yolo_imgsz_values=yolo_imgsz_values,
             device=yolo_device,
+            batch_size=yolo_batch_size,
             mask_threshold=pipeline_config.mask_threshold,
         )
     temporal_variants = build_temporal_sweep_variants(
@@ -446,10 +448,13 @@ def build_yolo_frame_sweep_variants(
     yolo_iou_thresholds: list[float] | None = None,
     yolo_imgsz_values: list[int] | None = None,
     device: str | None = None,
+    batch_size: int = 1,
     mask_threshold: int | None = None,
 ) -> list[FrameSweepVariant]:
     if yolo_weights is None:
         raise ValueError("yolo_weights is required for YOLO frame sweeps.")
+    if batch_size < 1:
+        raise ValueError("yolo_batch_size must be >= 1.")
 
     resolved_conf_thresholds = yolo_conf_thresholds or [0.25]
     resolved_iou_thresholds = yolo_iou_thresholds or [0.70]
@@ -472,6 +477,7 @@ def build_yolo_frame_sweep_variants(
                     iou=float(iou_threshold),
                     device=device,
                     mask_threshold=PipelineConfig().mask_threshold if mask_threshold is None else mask_threshold,
+                    batch_size=int(batch_size),
                 )
                 variants.append(
                     FrameSweepVariant(

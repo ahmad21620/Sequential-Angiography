@@ -47,6 +47,9 @@ class FakeModel:
 
     def predict(self, **kwargs):
         self.calls.append(kwargs)
+        source = kwargs.get("source")
+        if isinstance(source, (list, tuple)):
+            return [FakeResult() for _ in source]
         return [FakeResult()]
 
 
@@ -119,6 +122,7 @@ class YoloInferenceTests(unittest.TestCase):
             self.assertEqual(fake_model.calls[0]["conf"], 0.25)
             self.assertEqual(fake_model.calls[0]["iou"], 0.7)
             self.assertEqual(fake_model.calls[0]["device"], "0")
+            self.assertEqual(fake_model.calls[0]["batch"], 1)
 
             payload = json.loads(expected_json.read_text(encoding="utf-8"))
             self.assertEqual(payload["image_path"], str(image_path.resolve()))
@@ -141,6 +145,45 @@ class YoloInferenceTests(unittest.TestCase):
             self.assertEqual(payload["stenosis_points"][0]["degree"], 0.83)
             self.assertEqual(payload["stenosis_points"][0]["confidence"], 0.83)
             self.assertEqual(payload["yolo_detections"][0]["bbox"]["x1"], 100)
+
+    def test_process_yolo_tree_batches_predict_calls_when_workers_one(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            images_root = root / "keyframes"
+            output_root = root / "yolo_frame_results"
+            for index in range(1, 4):
+                _write_image(images_root / "case_001" / "view_01" / f"slice_{index:04d}.png", width=32, height=32)
+            fake_model = FakeModel()
+
+            jobs = discover_yolo_tree_jobs(images_root)
+            summary = process_yolo_tree(
+                jobs,
+                output_root=output_root,
+                images_root=images_root,
+                config=YoloInferenceConfig(
+                    weights="runs/stenosis/best.pt",
+                    imgsz=512,
+                    conf=0.35,
+                    iou=0.7,
+                    device="0",
+                    batch_size=2,
+                ),
+                workers=1,
+                model=fake_model,
+            )
+
+            self.assertEqual(summary.processed, 3)
+            self.assertEqual(summary.failed, 0)
+            self.assertEqual([len(call["source"]) for call in fake_model.calls], [2, 1])
+            self.assertTrue(all(call["batch"] == 2 for call in fake_model.calls))
+            self.assertTrue(
+                (
+                    output_root
+                    / "case_001"
+                    / "view_01"
+                    / "slice_0003_stenosis_results.json"
+                ).is_file()
+            )
 
     def test_cadica_layout_is_preserved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -263,6 +306,8 @@ class YoloInferenceTests(unittest.TestCase):
                         "0.7",
                         "--device",
                         "0",
+                        "--yolo-batch-size",
+                        "8",
                     ]
                 )
             finally:
@@ -271,6 +316,7 @@ class YoloInferenceTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(calls[0]["masks_root"], None)
             self.assertEqual(calls[0]["config"].device, "0")
+            self.assertEqual(calls[0]["config"].batch_size, 8)
             self.assertTrue(
                 (
                     output_root

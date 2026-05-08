@@ -100,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-conf-thresholds", help="Comma-separated YOLO confidence thresholds.")
     parser.add_argument("--yolo-iou-thresholds", help="Comma-separated YOLO NMS IoU thresholds.")
     parser.add_argument("--yolo-imgsz-values", help="Comma-separated YOLO inference image sizes.")
+    parser.add_argument("--yolo-batch-size", type=int, default=1, help="YOLO inference batch size. Use --workers 1 for GPU.")
     parser.add_argument("--device", help="Device string passed to Ultralytics for YOLO frame sweeps.")
     parser.add_argument(
         "--save-review-images",
@@ -147,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--yolo-weights is required when --frame-detector yolo.")
     if args.frame_detector == "yolo" and args.yolo_weights is not None and not Path(args.yolo_weights).is_file():
         parser.error(f"--yolo-weights is not a file: {args.yolo_weights}")
+    if args.yolo_batch_size < 1:
+        parser.error("--yolo-batch-size must be at least 1.")
     if args.frame_detector == "yolo":
         _warn_ignored_options(
             raw_args,
@@ -220,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             yolo_iou_thresholds=yolo_iou_thresholds,
             yolo_imgsz_values=yolo_imgsz_values,
             yolo_device=args.device,
+            yolo_batch_size=args.yolo_batch_size,
             min_supporting_frames_values=_parse_int_list(
                 args.min_supporting_frames_values,
                 "--min-supporting-frames-values",
