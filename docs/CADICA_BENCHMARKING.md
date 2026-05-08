@@ -167,6 +167,7 @@ python scripts/run_cadica_benchmark.py \
   --manifest work/cadica_prepared/manifest.csv \
   --frame-results-root work/cadica_frame_results \
   --temporal-results-root work/cadica_temporal_results \
+  --multiview-results-root work/cadica_multiview_results \
   --output-root work/cadica_benchmark \
   --frame-min-degree 0.0 \
   --box-margin-px 5 \
@@ -179,6 +180,8 @@ Main outputs:
 - `cadica_box_rows.csv`
 - `cadica_video_rows.csv`
 - `cadica_patient_rows.csv`
+- `cadica_multiview_patient_rows.csv` when `--multiview-results-root` is supplied
+- `cadica_multiview_side_rows.csv` when the manifest contains side metadata
 - `cadica_summary.json`
 - Review queues:
   - `false_positive_frames.csv`
@@ -234,6 +237,45 @@ but CADICA frame selection affects the meaning of persistence.
 The benchmark summary is supervised CADICA frame/video evaluation, not EHR
 weak-label agreement.
 
+## CADICA Multi-View Benchmarking
+
+CADICA multi-view benchmarking compares saved `case_multiview_fusion.json`
+outputs against labels derived from the CADICA manifest. It does not use
+`views.json`. `views.json` is only needed earlier when running multi-view
+fusion.
+
+Run it by adding `--multiview-results-root` to the normal CADICA benchmark:
+
+```bash
+python scripts/run_cadica_benchmark.py \
+  --manifest work/cadica_prepared/manifest.csv \
+  --frame-results-root work/cadica_frame_results \
+  --temporal-results-root work/cadica_temporal_results \
+  --multiview-results-root work/cadica_multiview_results \
+  --output-root work/cadica_benchmark \
+  --multiview-min-score 0.0
+```
+
+The benchmark expects files such as:
+
+```text
+work/cadica_multiview_results/p1/case_multiview_fusion.json
+```
+
+Patient-level ground truth is positive if any manifest row for that patient is
+from a lesion video or has a positive frame label. It is negative when all
+evaluated rows are nonlesion/negative. Unknown rows do not make a patient
+positive.
+
+Side-level metrics are written only when the manifest has `coronary_side` or
+`projection_group` metadata. CADICA has projection groups such as `LCA`,
+`LCA2`, and `RCA`; it does not provide numeric multi-view angles for this
+benchmark. Side-level labels and side-level predictions are kept separate, so
+left and right coronary-side evidence is not mixed.
+
+Frame, temporal/video, patient aggregation, and multi-view/case metrics are
+reported separately because they measure different stages of the pipeline.
+
 ## CADICA Threshold Sweep
 
 The CADICA threshold sweep is supervised and uses the prepared CADICA manifest
@@ -249,10 +291,12 @@ python scripts/run_cadica_benchmark_sweep.py \
   --manifest work/cadica_prepared/manifest.csv \
   --frame-results-root work/cadica_frame_results \
   --temporal-results-root work/cadica_temporal_results \
+  --multiview-results-root work/cadica_multiview_results \
   --output-root work/cadica_benchmark_sweep \
   --frame-min-degrees 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 \
   --box-margins-px 0,5,10 \
-  --video-prediction-sources frame_any,temporal_final
+  --video-prediction-sources frame_any,temporal_final \
+  --multiview-min-scores 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50
 ```
 
 You can also ask the normal CADICA benchmark command to write the threshold
@@ -263,6 +307,7 @@ python scripts/run_cadica_benchmark.py \
   --manifest work/cadica_prepared/manifest.csv \
   --frame-results-root work/cadica_frame_results \
   --temporal-results-root work/cadica_temporal_results \
+  --multiview-results-root work/cadica_multiview_results \
   --output-root work/cadica_benchmark \
   --write-threshold-sweep
 ```
@@ -274,5 +319,7 @@ Outputs:
 
 `frame_min_degree` controls whether predicted stenosis points count as
 positive. `box_margin_px` controls the tolerance around CADICA GT boxes for
-point-in-box localization. Frame, video, and patient metrics are reported
-separately because they answer different supervised CADICA questions.
+point-in-box localization. `multiview_min_score` controls the minimum
+multi-view confidence/score required for a saved multi-view result to count as
+positive. The sweep reloads existing prediction JSONs only; it does not rerun
+the pipeline.

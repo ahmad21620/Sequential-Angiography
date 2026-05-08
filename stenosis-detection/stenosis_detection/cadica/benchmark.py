@@ -7,12 +7,19 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Iterable
 
 
 FRAME_RESULT_SUFFIX = "_stenosis_results.json"
 TEMPORAL_RESULT_FILENAME = "view_temporal_fusion.json"
+MULTIVIEW_RESULT_FILENAME = "case_multiview_fusion.json"
 VIDEO_PREDICTION_SOURCES = {"frame_any", "temporal_final"}
+MULTIVIEW_SIDES = ("left", "right")
+PROJECTION_SIDE_BY_GROUP = {
+    "LCA": "left",
+    "LCA2": "left",
+    "RCA": "right",
+}
 REVIEW_CATEGORY_DIRS = {
     "false_positive": "false_positive",
     "false_negative": "false_negative",
@@ -37,6 +44,8 @@ class CadicaBenchmarkOutputs:
     false_negative_frames_csv: Path
     missed_gt_boxes_csv: Path
     unmatched_predicted_points_csv: Path
+    multiview_patient_rows_csv: Path | None = None
+    multiview_side_rows_csv: Path | None = None
     review_image_root: Path | None = None
 
     def to_dict(self) -> dict[str, str]:
@@ -52,6 +61,10 @@ class CadicaBenchmarkOutputs:
             "missed_gt_boxes_csv": str(self.missed_gt_boxes_csv),
             "unmatched_predicted_points_csv": str(self.unmatched_predicted_points_csv),
         }
+        if self.multiview_patient_rows_csv is not None:
+            payload["multiview_patient_rows_csv"] = str(self.multiview_patient_rows_csv)
+        if self.multiview_side_rows_csv is not None:
+            payload["multiview_side_rows_csv"] = str(self.multiview_side_rows_csv)
         if self.review_image_root is not None:
             payload["review_image_root"] = str(self.review_image_root)
         return payload
@@ -63,6 +76,8 @@ class CadicaBenchmarkResult:
     box_rows: list[dict[str, Any]]
     video_rows: list[dict[str, Any]]
     patient_rows: list[dict[str, Any]]
+    multiview_patient_rows: list[dict[str, Any]]
+    multiview_side_rows: list[dict[str, Any]]
     summary: dict[str, Any]
     outputs: CadicaBenchmarkOutputs
 
@@ -79,6 +94,8 @@ class ManifestFrame:
     prepared_image_path: Path | None
     frame_label: str
     video_label: str
+    coronary_side: str | None
+    projection_group: str | None
     boxes: list[dict[str, Any]]
 
 
@@ -99,15 +116,37 @@ class FramePrediction:
     points: list[PredictedPoint]
 
 
+@dataclass(frozen=True, slots=True)
+class MultiViewPrediction:
+    source_path: Path
+    predicted_positive: bool
+    score: float | None
+    lesion_present: bool | None
+    score_rule: str
+    side_predictions: dict[str, "MultiViewSidePrediction"]
+    skip_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MultiViewSidePrediction:
+    predicted_positive: bool
+    score: float | None
+    lesion_present: bool | None
+    score_rule: str
+    skip_reason: str = ""
+
+
 def run_cadica_benchmark(
     *,
     manifest: str | Path,
     frame_results_root: str | Path,
     output_root: str | Path,
     temporal_results_root: str | Path | None = None,
+    multiview_results_root: str | Path | None = None,
     frame_min_degree: float = 0.0,
     box_margin_px: float = 5.0,
     video_prediction_source: str = "frame_any",
+    multiview_min_score: float = 0.0,
     write_review_images: bool = False,
     max_review_images: int = 100,
     review_image_root: str | Path | None = None,
@@ -123,6 +162,8 @@ def run_cadica_benchmark(
         )
     if video_prediction_source == "temporal_final" and temporal_results_root is None:
         raise ValueError("--video-prediction-source temporal_final requires --temporal-results-root.")
+    if multiview_min_score < 0.0:
+        raise ValueError("multiview_min_score must be >= 0.0.")
     if max_review_images < 0:
         raise ValueError("max_review_images must be >= 0.")
 
@@ -130,12 +171,13 @@ def run_cadica_benchmark(
     resolved_frame_results_root = Path(frame_results_root)
     resolved_output_root = Path(output_root)
     resolved_temporal_root = None if temporal_results_root is None else Path(temporal_results_root)
+    resolved_multiview_root = None if multiview_results_root is None else Path(multiview_results_root)
     resolved_review_image_root = (
         None
         if not write_review_images
         else Path(review_image_root) if review_image_root is not None else resolved_output_root / "review_images"
     )
-    _validate_inputs(manifest_path, resolved_frame_results_root, resolved_temporal_root)
+    _validate_inputs(manifest_path, resolved_frame_results_root, resolved_temporal_root, resolved_multiview_root)
 
     manifest_frames = load_cadica_manifest(manifest_path)
     frame_predictions = _index_frame_predictions(resolved_frame_results_root)
@@ -151,18 +193,28 @@ def run_cadica_benchmark(
         video_prediction_source=video_prediction_source,
     )
     patient_rows = _build_patient_rows(video_rows)
+    multiview_patient_rows, multiview_side_rows, multiview_score_rule = _build_multiview_rows(
+        manifest_frames,
+        multiview_results_root=resolved_multiview_root,
+        multiview_min_score=multiview_min_score,
+    )
     summary = _build_summary(
         frame_rows,
         box_rows,
         video_rows,
         patient_rows,
+        multiview_patient_rows,
+        multiview_side_rows,
         manifest=manifest_path,
         frame_results_root=resolved_frame_results_root,
         output_root=resolved_output_root,
         temporal_results_root=resolved_temporal_root,
+        multiview_results_root=resolved_multiview_root,
         frame_min_degree=frame_min_degree,
         box_margin_px=box_margin_px,
         video_prediction_source=video_prediction_source,
+        multiview_min_score=multiview_min_score,
+        multiview_score_rule=multiview_score_rule,
         write_review_images=write_review_images,
         max_review_images=max_review_images,
         review_image_root=resolved_review_image_root,
@@ -173,6 +225,8 @@ def run_cadica_benchmark(
         box_rows=box_rows,
         video_rows=video_rows,
         patient_rows=patient_rows,
+        multiview_patient_rows=multiview_patient_rows,
+        multiview_side_rows=multiview_side_rows,
         summary=summary,
         unmatched_point_rows=unmatched_point_rows,
         review_image_root=resolved_review_image_root,
@@ -191,6 +245,8 @@ def run_cadica_benchmark(
         box_rows=box_rows,
         video_rows=video_rows,
         patient_rows=patient_rows,
+        multiview_patient_rows=multiview_patient_rows,
+        multiview_side_rows=multiview_side_rows,
         summary=summary,
         outputs=outputs,
     )
@@ -220,6 +276,8 @@ def save_cadica_benchmark_outputs(
     patient_rows: list[dict[str, Any]],
     summary: dict[str, Any],
     unmatched_point_rows: list[dict[str, Any]],
+    multiview_patient_rows: list[dict[str, Any]] | None = None,
+    multiview_side_rows: list[dict[str, Any]] | None = None,
     review_image_root: Path | None = None,
 ) -> CadicaBenchmarkOutputs:
     resolved_output_root = Path(output_root)
@@ -236,6 +294,16 @@ def save_cadica_benchmark_outputs(
         false_negative_frames_csv=resolved_output_root / "false_negative_frames.csv",
         missed_gt_boxes_csv=resolved_output_root / "missed_gt_boxes.csv",
         unmatched_predicted_points_csv=resolved_output_root / "unmatched_predicted_points.csv",
+        multiview_patient_rows_csv=(
+            resolved_output_root / "cadica_multiview_patient_rows.csv"
+            if multiview_patient_rows is not None
+            else None
+        ),
+        multiview_side_rows_csv=(
+            resolved_output_root / "cadica_multiview_side_rows.csv"
+            if multiview_side_rows
+            else None
+        ),
         review_image_root=review_image_root,
     )
 
@@ -244,6 +312,18 @@ def save_cadica_benchmark_outputs(
     _write_csv(outputs.box_rows_csv, box_rows, fieldnames=BOX_ROW_FIELDS)
     _write_csv(outputs.video_rows_csv, video_rows, fieldnames=VIDEO_ROW_FIELDS)
     _write_csv(outputs.patient_rows_csv, patient_rows, fieldnames=PATIENT_ROW_FIELDS)
+    if outputs.multiview_patient_rows_csv is not None and multiview_patient_rows is not None:
+        _write_csv(
+            outputs.multiview_patient_rows_csv,
+            multiview_patient_rows,
+            fieldnames=MULTIVIEW_PATIENT_ROW_FIELDS,
+        )
+    if outputs.multiview_side_rows_csv is not None and multiview_side_rows is not None:
+        _write_csv(
+            outputs.multiview_side_rows_csv,
+            multiview_side_rows,
+            fieldnames=MULTIVIEW_SIDE_ROW_FIELDS,
+        )
     _write_json(outputs.summary_json, summary)
     _write_csv(
         outputs.false_positive_frames_csv,
@@ -272,6 +352,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional root containing view_temporal_fusion.json outputs grouped by patient/video.",
     )
     parser.add_argument(
+        "--multiview-results-root",
+        help="Optional root containing case_multiview_fusion.json outputs grouped by patient/case.",
+    )
+    parser.add_argument(
         "--frame-min-degree",
         type=float,
         default=0.0,
@@ -288,6 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(VIDEO_PREDICTION_SOURCES),
         default="frame_any",
         help="Use any positive frame or temporal final lesion presence for video-level predictions.",
+    )
+    parser.add_argument(
+        "--multiview-min-score",
+        type=float,
+        default=0.0,
+        help="Minimum multi-view score required to count a case-level prediction as positive.",
     )
     parser.add_argument(
         "--write-review-images",
@@ -321,6 +411,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--sweep-video-prediction-sources",
         help="Comma-separated sources for --write-threshold-sweep: frame_any, temporal_final.",
     )
+    parser.add_argument(
+        "--sweep-multiview-min-scores",
+        help="Comma-separated multi-view score thresholds for --write-threshold-sweep.",
+    )
     return parser
 
 
@@ -335,9 +429,11 @@ def main(argv: list[str] | None = None) -> int:
             frame_results_root=args.frame_results_root,
             output_root=args.output_root,
             temporal_results_root=args.temporal_results_root,
+            multiview_results_root=args.multiview_results_root,
             frame_min_degree=args.frame_min_degree,
             box_margin_px=args.box_margin_px,
             video_prediction_source=args.video_prediction_source,
+            multiview_min_score=args.multiview_min_score,
             write_review_images=args.write_review_images,
             max_review_images=args.max_review_images,
             review_image_root=args.review_image_root,
@@ -350,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 frame_results_root=args.frame_results_root,
                 output_root=args.output_root,
                 temporal_results_root=args.temporal_results_root,
+                multiview_results_root=args.multiview_results_root,
                 frame_min_degrees=(
                     None
                     if args.sweep_frame_min_degrees is None
@@ -363,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
                     if args.sweep_video_prediction_sources is None
                     else parse_video_prediction_sources(args.sweep_video_prediction_sources)
                 ),
+                multiview_min_scores=(
+                    None
+                    if args.sweep_multiview_min_scores is None
+                    else parse_float_list(args.sweep_multiview_min_scores)
+                ),
             )
     except (FileNotFoundError, NotADirectoryError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"CADICA benchmark failed: {exc}", file=sys.stderr)
@@ -374,6 +476,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Evaluated frames: {frame_metrics['total_evaluated']}")
     print(f"Frame F1: {_format_optional_float(frame_metrics['f1'])}")
     print(f"Box recall: {_format_optional_float(box_metrics['box_recall'])}")
+    if result.summary["config"]["multiview_evaluated"]:
+        multiview_metrics = result.summary["multiview_patient_binary_metrics"] or {}
+        print(f"Multi-view patient F1: {_format_optional_float(multiview_metrics.get('f1'))}")
     print(f"Summary: {result.outputs.summary_json}")
     if sweep_outputs is not None:
         print(f"Threshold sweep CSV: {sweep_outputs['cadica_threshold_sweep_csv']}")
@@ -530,19 +635,377 @@ def _build_patient_rows(video_rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return patient_rows
 
 
+def _build_multiview_rows(
+    manifest_frames: list[ManifestFrame],
+    *,
+    multiview_results_root: Path | None,
+    multiview_min_score: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    if multiview_results_root is None:
+        return [], [], None
+
+    predictions = _index_multiview_predictions(multiview_results_root, multiview_min_score=multiview_min_score)
+    patient_label_rows = _multiview_patient_label_rows(manifest_frames)
+    patient_rows = [
+        _multiview_patient_row(label_row, predictions.get(label_row["patient_id"]))
+        for label_row in patient_label_rows
+    ]
+    side_label_rows, side_skip_reason = _multiview_side_label_rows(manifest_frames)
+    side_rows = [
+        _multiview_side_row(label_row, predictions.get(label_row["patient_id"]))
+        for label_row in side_label_rows
+    ]
+    if not side_rows and side_skip_reason:
+        for row in patient_rows:
+            row["side_skip_reason"] = side_skip_reason
+    score_rule = _summarize_multiview_score_rule(predictions.values())
+    return patient_rows, side_rows, score_rule
+
+
+def _multiview_patient_label_rows(manifest_frames: list[ManifestFrame]) -> list[dict[str, Any]]:
+    rows_by_patient: dict[str, list[ManifestFrame]] = defaultdict(list)
+    for manifest_frame in manifest_frames:
+        rows_by_patient[manifest_frame.patient_id].append(manifest_frame)
+
+    label_rows: list[dict[str, Any]] = []
+    for patient_id, rows in sorted(rows_by_patient.items()):
+        label_positive = _manifest_rows_label_target(rows)
+        lesion_video_ids = {row.video_id for row in rows if row.video_label == "lesion"}
+        label_rows.append(
+            {
+                "patient_id": patient_id,
+                "label_positive": label_positive,
+                "lesion_video_count": len(lesion_video_ids),
+                "positive_frame_count": sum(1 for row in rows if row.frame_label == "positive"),
+            }
+        )
+    return label_rows
+
+
+def _multiview_side_label_rows(manifest_frames: list[ManifestFrame]) -> tuple[list[dict[str, Any]], str | None]:
+    if not any(_manifest_frame_side(row) is not None for row in manifest_frames):
+        return [], "missing_side_metadata"
+
+    rows_by_patient_side: dict[tuple[str, str], list[ManifestFrame]] = defaultdict(list)
+    for manifest_frame in manifest_frames:
+        side = _manifest_frame_side(manifest_frame)
+        if side is None:
+            continue
+        rows_by_patient_side[(manifest_frame.patient_id, side)].append(manifest_frame)
+
+    label_rows: list[dict[str, Any]] = []
+    for (patient_id, coronary_side), rows in sorted(rows_by_patient_side.items()):
+        label_positive = _manifest_rows_label_target(rows)
+        lesion_video_ids = {row.video_id for row in rows if row.video_label == "lesion"}
+        label_rows.append(
+            {
+                "patient_id": patient_id,
+                "coronary_side": coronary_side,
+                "label_positive": label_positive,
+                "lesion_video_count": len(lesion_video_ids),
+                "positive_frame_count": sum(1 for row in rows if row.frame_label == "positive"),
+            }
+        )
+    return label_rows, None
+
+
+def _manifest_rows_label_target(rows: list[ManifestFrame]) -> bool | None:
+    if any(row.video_label == "lesion" or row.frame_label == "positive" for row in rows):
+        return True
+    known_negative_rows = [
+        row
+        for row in rows
+        if row.video_label == "nonlesion" or row.frame_label == "negative"
+    ]
+    if known_negative_rows and len(known_negative_rows) == len(rows):
+        return False
+    return None
+
+
+def _manifest_frame_side(manifest_frame: ManifestFrame) -> str | None:
+    side = (manifest_frame.coronary_side or "").strip().lower()
+    if side in MULTIVIEW_SIDES:
+        return side
+    group = (manifest_frame.projection_group or "").strip().upper()
+    return PROJECTION_SIDE_BY_GROUP.get(group)
+
+
+def _multiview_patient_row(
+    label_row: dict[str, Any],
+    prediction: MultiViewPrediction | None,
+) -> dict[str, Any]:
+    label_target = label_row["label_positive"]
+    predicted_positive = False if prediction is None else prediction.predicted_positive
+    skip_reason = _multiview_skip_reason(label_target, prediction)
+    return {
+        "patient_id": label_row["patient_id"],
+        "label_positive": label_target,
+        "predicted_positive": predicted_positive,
+        "score": None if prediction is None else prediction.score,
+        "outcome": "" if skip_reason else _binary_outcome(label_target=label_target, predicted_positive=predicted_positive),
+        "lesion_video_count": label_row["lesion_video_count"],
+        "positive_frame_count": label_row["positive_frame_count"],
+        "multiview_json_path": "" if prediction is None else str(prediction.source_path),
+        "skip_reason": skip_reason,
+    }
+
+
+def _multiview_side_row(
+    label_row: dict[str, Any],
+    prediction: MultiViewPrediction | None,
+) -> dict[str, Any]:
+    side = str(label_row["coronary_side"])
+    side_prediction = None if prediction is None else prediction.side_predictions.get(side)
+    label_target = label_row["label_positive"]
+    predicted_positive = False if side_prediction is None else side_prediction.predicted_positive
+    skip_reason = _multiview_skip_reason(label_target, prediction)
+    if not skip_reason and side_prediction is None:
+        skip_reason = "missing_side_prediction"
+    return {
+        "patient_id": label_row["patient_id"],
+        "coronary_side": side,
+        "label_positive": label_target,
+        "predicted_positive": predicted_positive,
+        "score": None if side_prediction is None else side_prediction.score,
+        "outcome": "" if skip_reason else _binary_outcome(label_target=label_target, predicted_positive=predicted_positive),
+        "lesion_video_count": label_row["lesion_video_count"],
+        "positive_frame_count": label_row["positive_frame_count"],
+        "multiview_json_path": "" if prediction is None else str(prediction.source_path),
+        "skip_reason": skip_reason,
+    }
+
+
+def _multiview_skip_reason(label_target: bool | None, prediction: MultiViewPrediction | None) -> str:
+    if label_target is None:
+        return "unknown_label"
+    if prediction is None:
+        return "missing_multiview_result"
+    return prediction.skip_reason
+
+
+def _index_multiview_predictions(
+    multiview_results_root: Path,
+    *,
+    multiview_min_score: float,
+) -> dict[str, MultiViewPrediction]:
+    predictions: dict[str, MultiViewPrediction] = {}
+    for result_path in sorted(multiview_results_root.rglob(MULTIVIEW_RESULT_FILENAME)):
+        if not result_path.is_file():
+            continue
+        patient_id = _multiview_patient_id_from_path(result_path, multiview_results_root)
+        payload = _read_json_object(result_path)
+        predictions.setdefault(
+            patient_id,
+            _extract_multiview_prediction(result_path, payload, multiview_min_score=multiview_min_score),
+        )
+    return predictions
+
+
+def _multiview_patient_id_from_path(result_path: Path, multiview_results_root: Path) -> str:
+    try:
+        relative_path = result_path.resolve().relative_to(multiview_results_root.resolve())
+    except ValueError:
+        relative_path = result_path
+    if len(relative_path.parts) >= 2:
+        return relative_path.parts[0]
+    return result_path.parent.name
+
+
+def _extract_multiview_prediction(
+    result_path: Path,
+    payload: dict[str, Any],
+    *,
+    multiview_min_score: float,
+) -> MultiViewPrediction:
+    if payload.get("split_by_coronary_side") is True and isinstance(payload.get("side_results"), dict):
+        side_predictions: dict[str, MultiViewSidePrediction] = {}
+        for side in MULTIVIEW_SIDES:
+            side_payload = payload["side_results"].get(side)
+            if isinstance(side_payload, dict):
+                side_predictions[side] = _extract_multiview_side_prediction(
+                    side_payload,
+                    multiview_min_score=multiview_min_score,
+                )
+        best_side_prediction = _select_best_multiview_side(side_predictions)
+        predicted_positive = any(side_prediction.predicted_positive for side_prediction in side_predictions.values())
+        return MultiViewPrediction(
+            source_path=result_path,
+            predicted_positive=predicted_positive,
+            score=None if best_side_prediction is None else best_side_prediction.score,
+            lesion_present=None if best_side_prediction is None else best_side_prediction.lesion_present,
+            score_rule="split_side_any_positive",
+            side_predictions=side_predictions,
+            skip_reason="" if side_predictions else "missing_side_results",
+        )
+
+    side_predictions = _side_predictions_from_overall_payload(payload, multiview_min_score=multiview_min_score)
+    single_prediction = _extract_multiview_side_prediction(payload, multiview_min_score=multiview_min_score)
+    return MultiViewPrediction(
+        source_path=result_path,
+        predicted_positive=single_prediction.predicted_positive,
+        score=single_prediction.score,
+        lesion_present=single_prediction.lesion_present,
+        score_rule=single_prediction.score_rule,
+        side_predictions=side_predictions,
+        skip_reason=single_prediction.skip_reason,
+    )
+
+
+def _extract_multiview_side_prediction(
+    payload: dict[str, Any],
+    *,
+    multiview_min_score: float,
+) -> MultiViewSidePrediction:
+    lesion_present = _extract_lesion_present(payload)
+    score = _extract_multiview_score(payload)
+    score_for_threshold = 0.0 if score is None else score
+    if lesion_present is None:
+        predicted_positive = score_for_threshold >= multiview_min_score
+        score_rule = "score_threshold_without_explicit_lesion_present"
+    else:
+        predicted_positive = lesion_present and score_for_threshold >= multiview_min_score
+        score_rule = "explicit_lesion_present_and_score_threshold"
+    return MultiViewSidePrediction(
+        predicted_positive=predicted_positive,
+        score=score,
+        lesion_present=lesion_present,
+        score_rule=score_rule,
+    )
+
+
+def _extract_lesion_present(payload: dict[str, Any]) -> bool | None:
+    for key in ("lesion_present", "final_lesion_present", "case_lesion_present"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value
+    overall_result = payload.get("overall_result")
+    if isinstance(overall_result, dict):
+        nested = _extract_lesion_present(overall_result)
+        if nested is not None:
+            return nested
+    if "final_case_lesion" in payload:
+        return isinstance(payload.get("final_case_lesion"), dict)
+    if "final_lesion" in payload:
+        return isinstance(payload.get("final_lesion"), dict)
+    return None
+
+
+def _extract_multiview_score(payload: dict[str, Any]) -> float | None:
+    overall_result = payload.get("overall_result")
+    if isinstance(overall_result, dict):
+        nested_score = _extract_multiview_score(overall_result)
+        if nested_score is not None:
+            return nested_score
+
+    final_case_lesion = payload.get("final_case_lesion") if isinstance(payload.get("final_case_lesion"), dict) else {}
+    final_lesion = payload.get("final_lesion") if isinstance(payload.get("final_lesion"), dict) else {}
+    confidence = payload.get("confidence") if isinstance(payload.get("confidence"), dict) else {}
+    lesion_confidence = (
+        final_case_lesion.get("confidence")
+        if isinstance(final_case_lesion.get("confidence"), dict)
+        else final_lesion.get("confidence") if isinstance(final_lesion.get("confidence"), dict) else {}
+    )
+    degrees = (
+        final_case_lesion.get("degrees")
+        if isinstance(final_case_lesion.get("degrees"), dict)
+        else final_lesion.get("degrees") if isinstance(final_lesion.get("degrees"), dict) else {}
+    )
+    for value in (
+        confidence.get("score"),
+        lesion_confidence.get("score"),
+        payload.get("confidence_score"),
+        payload.get("score"),
+        final_case_lesion.get("total_score"),
+        final_lesion.get("total_score"),
+        degrees.get("median"),
+        degrees.get("max"),
+        payload.get("degree"),
+    ):
+        score = _optional_float(value)
+        if score is not None:
+            return score
+    return 1.0 if _extract_lesion_present(payload) is True else 0.0
+
+
+def _side_predictions_from_overall_payload(
+    payload: dict[str, Any],
+    *,
+    multiview_min_score: float,
+) -> dict[str, MultiViewSidePrediction]:
+    side_predictions: dict[str, MultiViewSidePrediction] = {}
+    overall_result = payload.get("overall_result")
+    if isinstance(overall_result, dict):
+        side_predictions.update(
+            _side_predictions_from_overall_payload(overall_result, multiview_min_score=multiview_min_score)
+        )
+    for key in ("side_predictions", "side_results"):
+        raw_side_payloads = payload.get(key)
+        if not isinstance(raw_side_payloads, dict):
+            continue
+        for side in MULTIVIEW_SIDES:
+            side_payload = raw_side_payloads.get(side)
+            if isinstance(side_payload, dict):
+                side_predictions[side] = _extract_multiview_side_prediction(
+                    side_payload,
+                    multiview_min_score=multiview_min_score,
+                )
+    return side_predictions
+
+
+def _select_best_multiview_side(
+    side_predictions: dict[str, MultiViewSidePrediction],
+) -> MultiViewSidePrediction | None:
+    if not side_predictions:
+        return None
+    return max(
+        side_predictions.values(),
+        key=lambda side_prediction: (
+            side_prediction.predicted_positive,
+            -1.0 if side_prediction.score is None else side_prediction.score,
+        ),
+    )
+
+
+def _summarize_multiview_score_rule(predictions: Iterable[MultiViewPrediction]) -> str | None:
+    rules = sorted({prediction.score_rule for prediction in predictions if prediction.score_rule})
+    if not rules:
+        return None
+    return ",".join(rules)
+
+
+def _multiview_side_summary_skip_reason(
+    multiview_patient_rows: list[dict[str, Any]],
+    multiview_side_rows: list[dict[str, Any]],
+    *,
+    multiview_results_root: Path | None,
+) -> str | None:
+    if multiview_results_root is None or multiview_side_rows:
+        return None
+    for row in multiview_patient_rows:
+        reason = row.get("side_skip_reason")
+        if reason:
+            return str(reason)
+    return "missing_side_metadata"
+
+
 def _build_summary(
     frame_rows: list[dict[str, Any]],
     box_rows: list[dict[str, Any]],
     video_rows: list[dict[str, Any]],
     patient_rows: list[dict[str, Any]],
+    multiview_patient_rows: list[dict[str, Any]],
+    multiview_side_rows: list[dict[str, Any]],
     *,
     manifest: Path,
     frame_results_root: Path,
     output_root: Path,
     temporal_results_root: Path | None,
+    multiview_results_root: Path | None,
     frame_min_degree: float,
     box_margin_px: float,
     video_prediction_source: str,
+    multiview_min_score: float,
+    multiview_score_rule: str | None,
     write_review_images: bool,
     max_review_images: int,
     review_image_root: Path | None,
@@ -558,9 +1021,13 @@ def _build_summary(
             "frame_results_root": str(frame_results_root),
             "output_root": str(output_root),
             "temporal_results_root": None if temporal_results_root is None else str(temporal_results_root),
+            "multiview_results_root": None if multiview_results_root is None else str(multiview_results_root),
             "frame_min_degree": float(frame_min_degree),
             "box_margin_px": float(box_margin_px),
             "video_prediction_source": video_prediction_source,
+            "multiview_min_score": float(multiview_min_score),
+            "multiview_evaluated": multiview_results_root is not None,
+            "multiview_score_rule": multiview_score_rule,
             "write_review_images": write_review_images,
             "max_review_images": int(max_review_images),
             "review_image_root": None if review_image_root is None else str(review_image_root),
@@ -584,11 +1051,29 @@ def _build_summary(
         },
         "video_binary_metrics": _binary_metrics_from_rows(video_rows),
         "patient_binary_metrics": _binary_metrics_from_rows(patient_rows),
+        "multiview_patient_binary_metrics": (
+            _binary_metrics_from_rows(multiview_patient_rows) if multiview_results_root is not None else None
+        ),
+        "multiview_side_binary_metrics": (
+            _binary_metrics_from_rows(multiview_side_rows) if multiview_side_rows else None
+        ),
+        "multiview_evaluated": multiview_results_root is not None,
+        "multiview_side_skip_reason": _multiview_side_summary_skip_reason(
+            multiview_patient_rows,
+            multiview_side_rows,
+            multiview_results_root=multiview_results_root,
+        ),
         "counts": {
             "frame_label_counts": dict(sorted(Counter(str(row["frame_label"]) for row in frame_rows).items())),
             "video_label_counts": dict(sorted(Counter(str(row["video_label"]) for row in video_rows).items())),
             "frame_skip_reason_counts": dict(
                 sorted(Counter(str(row["skip_reason"] or "none") for row in frame_rows).items())
+            ),
+            "multiview_patient_skip_reason_counts": dict(
+                sorted(Counter(str(row.get("skip_reason") or "none") for row in multiview_patient_rows).items())
+            ),
+            "multiview_side_skip_reason_counts": dict(
+                sorted(Counter(str(row.get("skip_reason") or "none") for row in multiview_side_rows).items())
             ),
         },
     }
@@ -914,6 +1399,8 @@ def _load_manifest_frame(row: dict[str, Any], *, row_number: int, manifest_path:
         prepared_image_path=prepared_image_path,
         frame_label=str(row.get("frame_label") or "unknown"),
         video_label=str(row.get("video_label") or "unknown"),
+        coronary_side=_optional_text(row.get("coronary_side")),
+        projection_group=_optional_text(row.get("projection_group")),
         boxes=[box for box in gt_boxes if isinstance(box, dict)],
     )
 
@@ -1037,6 +1524,15 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or stripped.lower() in {"none", "unknown", "nan"}:
+        return None
+    return stripped
+
+
 def _safe_divide(numerator: int | float, denominator: int | float) -> float | None:
     if denominator == 0:
         return None
@@ -1049,7 +1545,12 @@ def _format_optional_float(value: object) -> str:
     return f"{float(value):.4f}"
 
 
-def _validate_inputs(manifest: Path, frame_results_root: Path, temporal_results_root: Path | None) -> None:
+def _validate_inputs(
+    manifest: Path,
+    frame_results_root: Path,
+    temporal_results_root: Path | None,
+    multiview_results_root: Path | None = None,
+) -> None:
     if not manifest.exists():
         raise FileNotFoundError(f"CADICA manifest does not exist: {manifest}")
     if not manifest.is_file():
@@ -1062,6 +1563,10 @@ def _validate_inputs(manifest: Path, frame_results_root: Path, temporal_results_
         raise FileNotFoundError(f"Temporal results root does not exist: {temporal_results_root}")
     if temporal_results_root is not None and not temporal_results_root.is_dir():
         raise NotADirectoryError(f"Temporal results root is not a directory: {temporal_results_root}")
+    if multiview_results_root is not None and not multiview_results_root.exists():
+        raise FileNotFoundError(f"Multi-view results root does not exist: {multiview_results_root}")
+    if multiview_results_root is not None and not multiview_results_root.is_dir():
+        raise NotADirectoryError(f"Multi-view results root is not a directory: {multiview_results_root}")
 
 
 FRAME_ROW_FIELDS = [
@@ -1120,6 +1625,31 @@ PATIENT_ROW_FIELDS = [
     "lesion_video_count",
     "predicted_positive_video_count",
     "outcome",
+]
+
+MULTIVIEW_PATIENT_ROW_FIELDS = [
+    "patient_id",
+    "label_positive",
+    "predicted_positive",
+    "score",
+    "outcome",
+    "lesion_video_count",
+    "positive_frame_count",
+    "multiview_json_path",
+    "skip_reason",
+]
+
+MULTIVIEW_SIDE_ROW_FIELDS = [
+    "patient_id",
+    "coronary_side",
+    "label_positive",
+    "predicted_positive",
+    "score",
+    "outcome",
+    "lesion_video_count",
+    "positive_frame_count",
+    "multiview_json_path",
+    "skip_reason",
 ]
 
 UNMATCHED_POINT_ROW_FIELDS = [

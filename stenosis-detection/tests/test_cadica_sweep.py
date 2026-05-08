@@ -141,6 +141,93 @@ class CadicaThresholdSweepTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be >= 0"):
             parse_float_list("0,-0.1")
 
+    def test_benchmark_includes_multiview_patient_and_side_metrics_without_views_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path, frame_results_root, multiview_results_root = self._write_multiview_dataset(
+                temp_root,
+                include_side_metadata=True,
+            )
+            output_root = temp_root / "benchmark"
+
+            result = run_cadica_benchmark(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                multiview_results_root=multiview_results_root,
+                output_root=output_root,
+                multiview_min_score=0.5,
+            )
+
+            self.assertFalse((multiview_results_root / "p1" / "views.json").exists())
+            self.assertTrue((output_root / "cadica_multiview_patient_rows.csv").is_file())
+            self.assertTrue((output_root / "cadica_multiview_side_rows.csv").is_file())
+            self.assertTrue(result.summary["config"]["multiview_evaluated"])
+            patient_metrics = result.summary["multiview_patient_binary_metrics"]
+            self.assertEqual(patient_metrics["TP"], 1)
+            self.assertEqual(patient_metrics["FP"], 1)
+            self.assertEqual(patient_metrics["TN"], 1)
+            self.assertEqual(patient_metrics["FN"], 1)
+            side_metrics = result.summary["multiview_side_binary_metrics"]
+            self.assertEqual(side_metrics["TP"], 1)
+            self.assertEqual(side_metrics["FP"], 1)
+            self.assertEqual(side_metrics["TN"], 1)
+            self.assertEqual(side_metrics["FN"], 1)
+
+    def test_multiview_side_metrics_are_skipped_without_side_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path, frame_results_root, multiview_results_root = self._write_multiview_dataset(
+                temp_root,
+                include_side_metadata=False,
+            )
+            output_root = temp_root / "benchmark"
+
+            result = run_cadica_benchmark(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                multiview_results_root=multiview_results_root,
+                output_root=output_root,
+            )
+
+            self.assertTrue((output_root / "cadica_multiview_patient_rows.csv").is_file())
+            self.assertFalse((output_root / "cadica_multiview_side_rows.csv").exists())
+            self.assertIsNone(result.summary["multiview_side_binary_metrics"])
+            self.assertEqual(
+                result.summary["counts"]["multiview_patient_skip_reason_counts"].get("none"),
+                4,
+            )
+
+    def test_sweep_contains_multiview_columns_and_threshold_changes_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path, frame_results_root, multiview_results_root = self._write_multiview_dataset(
+                temp_root,
+                include_side_metadata=True,
+            )
+            output_root = temp_root / "sweep"
+
+            run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                multiview_results_root=multiview_results_root,
+                output_root=output_root,
+                frame_min_degrees=[0.0],
+                box_margins_px=[0.0],
+                multiview_min_scores=[0.0, 0.5],
+            )
+
+            rows = {
+                float(row["multiview_min_score"]): row
+                for row in self._read_csv(output_root / "cadica_threshold_sweep.csv")
+            }
+            self.assertTrue((output_root / "cadica_multiview_patient_rows.csv").is_file())
+            self.assertTrue((output_root / "cadica_multiview_side_rows.csv").is_file())
+            self.assertIn("multiview_patient_F1", rows[0.0])
+            self.assertEqual(int(rows[0.0]["multiview_patient_TP"]), 2)
+            self.assertEqual(int(rows[0.0]["multiview_patient_FN"]), 0)
+            self.assertEqual(int(rows[0.5]["multiview_patient_TP"]), 1)
+            self.assertEqual(int(rows[0.5]["multiview_patient_FN"]), 1)
+
     def _write_synthetic_dataset(self, root: Path) -> tuple[Path, Path]:
         manifest_path = root / "manifest.csv"
         frame_results_root = root / "frame_results"
@@ -180,6 +267,83 @@ class CadicaThresholdSweepTests(unittest.TestCase):
         )
         return manifest_path, frame_results_root
 
+    def _write_multiview_dataset(self, root: Path, *, include_side_metadata: bool) -> tuple[Path, Path, Path]:
+        manifest_path = root / "manifest.csv"
+        frame_results_root = root / "frame_results"
+        multiview_results_root = root / "multiview_results"
+        rows = [
+            self._manifest_row(
+                "p1",
+                "v1",
+                1,
+                "lesion",
+                "positive",
+                [{"x": 10, "y": 10, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/p1.txt"}],
+                coronary_side="left" if include_side_metadata else None,
+                projection_group="LCA" if include_side_metadata else None,
+            ),
+            self._manifest_row(
+                "p2",
+                "v1",
+                1,
+                "nonlesion",
+                "negative",
+                [],
+                coronary_side="right" if include_side_metadata else None,
+                projection_group="RCA" if include_side_metadata else None,
+            ),
+            self._manifest_row(
+                "p3",
+                "v1",
+                1,
+                "lesion",
+                "positive",
+                [{"x": 20, "y": 20, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/p3.txt"}],
+                coronary_side="right" if include_side_metadata else None,
+                projection_group="RCA" if include_side_metadata else None,
+            ),
+            self._manifest_row(
+                "p4",
+                "v1",
+                1,
+                "nonlesion",
+                "negative",
+                [],
+                coronary_side="left" if include_side_metadata else None,
+                projection_group="LCA" if include_side_metadata else None,
+            ),
+        ]
+        self._write_manifest_rows(manifest_path, rows)
+        for row in rows:
+            self._write_frame_result(
+                frame_results_root
+                / str(row["patient_id"])
+                / str(row["video_id"])
+                / "slice_00001_stenosis_results.json",
+                patient_id=str(row["patient_id"]),
+                video_id=str(row["video_id"]),
+                frame_id=1,
+                points=[],
+            )
+
+        self._write_multiview_result(
+            multiview_results_root / "p1" / "case_multiview_fusion.json",
+            side_scores={"left": 0.9},
+        )
+        self._write_multiview_result(
+            multiview_results_root / "p2" / "case_multiview_fusion.json",
+            side_scores={"right": 0.8},
+        )
+        self._write_multiview_result(
+            multiview_results_root / "p3" / "case_multiview_fusion.json",
+            side_scores={"right": 0.4},
+        )
+        self._write_multiview_result(
+            multiview_results_root / "p4" / "case_multiview_fusion.json",
+            side_scores={"left": None},
+        )
+        return manifest_path, frame_results_root, multiview_results_root
+
     def _write_manifest_rows(self, path: Path, rows: list[dict[str, object]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8", newline="") as handle:
@@ -195,8 +359,10 @@ class CadicaThresholdSweepTests(unittest.TestCase):
         video_label: str,
         frame_label: str,
         boxes: list[dict[str, object]],
+        coronary_side: str | None = None,
+        projection_group: str | None = None,
     ) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "patient_id": patient_id,
             "video_id": video_id,
             "frame_id": frame_id,
@@ -211,6 +377,11 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             "gt_box_source_paths": json.dumps([box["source_path"] for box in boxes]),
             "gt_boxes_json": json.dumps(boxes),
         }
+        if coronary_side is not None:
+            row["coronary_side"] = coronary_side
+        if projection_group is not None:
+            row["projection_group"] = projection_group
+        return row
 
     def _write_frame_result(
         self,
@@ -235,6 +406,34 @@ class CadicaThresholdSweepTests(unittest.TestCase):
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_multiview_result(self, path: Path, *, side_scores: dict[str, float | None]) -> None:
+        side_results: dict[str, object] = {}
+        for side, score in side_scores.items():
+            side_results[side] = {
+                "case_id": f"{path.parent.name}:{side}",
+                "final_case_lesion": None if score is None else self._final_case_lesion(score),
+                "confidence": {"score": 0.0 if score is None else score, "label": "medium"},
+                "supporting_views": [] if score is None else [f"{side}_view"],
+                "fusion_metadata": {"total_candidate_count": 0 if score is None else 1},
+            }
+        payload = {
+            "case_id": path.parent.name,
+            "split_by_coronary_side": True,
+            "side_results": side_results,
+            "skipped_sides": [side for side in ("left", "right") if side not in side_results],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _final_case_lesion(self, score: float) -> dict[str, object]:
+        return {
+            "severity": "moderate",
+            "degrees": {"median": score, "max": score},
+            "total_score": score,
+            "confidence": {"score": score, "label": "medium"},
+            "distinct_supporting_view_ids": ["view_a"],
+        }
 
     def _read_csv(self, path: Path) -> list[dict[str, str]]:
         with path.open("r", encoding="utf-8", newline="") as handle:
