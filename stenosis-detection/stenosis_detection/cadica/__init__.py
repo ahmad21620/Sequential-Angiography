@@ -8,6 +8,7 @@ from .annotations import (
 )
 from .benchmark import CadicaBenchmarkResult, run_cadica_benchmark
 from .prepare import CadicaProjectionInfo, load_cadica_projection_info, prepare_cadica_for_pipeline
+from .sweep import run_cadica_threshold_sweep
 
 __all__ = [
     "CadicaBox",
@@ -21,4 +22,5 @@ __all__ = [
     "read_selected_frames",
     "read_video_list",
     "run_cadica_benchmark",
+    "run_cadica_threshold_sweep",
 ]

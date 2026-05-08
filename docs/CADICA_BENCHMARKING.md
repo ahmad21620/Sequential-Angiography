@@ -233,3 +233,46 @@ but CADICA frame selection affects the meaning of persistence.
 
 The benchmark summary is supervised CADICA frame/video evaluation, not EHR
 weak-label agreement.
+
+## CADICA Threshold Sweep
+
+The CADICA threshold sweep is supervised and uses the prepared CADICA manifest
+and CADICA ground-truth boxes. It is not weak-label based, and it does not
+rerun segmentation, stenosis detection, temporal fusion, or multi-view fusion.
+It only reloads existing prediction JSONs and recomputes CADICA metrics across
+benchmark thresholds.
+
+Recommended starting command:
+
+```bash
+python scripts/run_cadica_benchmark_sweep.py \
+  --manifest work/cadica_prepared/manifest.csv \
+  --frame-results-root work/cadica_frame_results \
+  --temporal-results-root work/cadica_temporal_results \
+  --output-root work/cadica_benchmark_sweep \
+  --frame-min-degrees 0.0,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 \
+  --box-margins-px 0,5,10 \
+  --video-prediction-sources frame_any,temporal_final
+```
+
+You can also ask the normal CADICA benchmark command to write the threshold
+sweep beside its usual row-level outputs:
+
+```bash
+python scripts/run_cadica_benchmark.py \
+  --manifest work/cadica_prepared/manifest.csv \
+  --frame-results-root work/cadica_frame_results \
+  --temporal-results-root work/cadica_temporal_results \
+  --output-root work/cadica_benchmark \
+  --write-threshold-sweep
+```
+
+Outputs:
+
+- `cadica_threshold_sweep.csv`
+- `cadica_threshold_sweep_summary.json`
+
+`frame_min_degree` controls whether predicted stenosis points count as
+positive. `box_margin_px` controls the tolerance around CADICA GT boxes for
+point-in-box localization. Frame, video, and patient metrics are reported
+separately because they answer different supervised CADICA questions.

@@ -304,6 +304,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-image-root",
         help="Optional review image output root. Defaults to <output-root>/review_images.",
     )
+    parser.add_argument(
+        "--write-threshold-sweep",
+        action="store_true",
+        help="Also write a supervised CADICA threshold sweep CSV/JSON under --output-root.",
+    )
+    parser.add_argument(
+        "--sweep-frame-min-degrees",
+        help="Comma-separated frame degree thresholds for --write-threshold-sweep.",
+    )
+    parser.add_argument(
+        "--sweep-box-margins-px",
+        help="Comma-separated CADICA box margins in pixels for --write-threshold-sweep.",
+    )
+    parser.add_argument(
+        "--sweep-video-prediction-sources",
+        help="Comma-separated sources for --write-threshold-sweep: frame_any, temporal_final.",
+    )
     return parser
 
 
@@ -311,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    sweep_outputs: dict[str, Path] | None = None
     try:
         result = run_cadica_benchmark(
             manifest=args.manifest,
@@ -324,6 +342,28 @@ def main(argv: list[str] | None = None) -> int:
             max_review_images=args.max_review_images,
             review_image_root=args.review_image_root,
         )
+        if args.write_threshold_sweep:
+            from .sweep import parse_float_list, parse_video_prediction_sources, run_cadica_threshold_sweep
+
+            sweep_outputs = run_cadica_threshold_sweep(
+                manifest=args.manifest,
+                frame_results_root=args.frame_results_root,
+                output_root=args.output_root,
+                temporal_results_root=args.temporal_results_root,
+                frame_min_degrees=(
+                    None
+                    if args.sweep_frame_min_degrees is None
+                    else parse_float_list(args.sweep_frame_min_degrees)
+                ),
+                box_margins_px=(
+                    None if args.sweep_box_margins_px is None else parse_float_list(args.sweep_box_margins_px)
+                ),
+                video_prediction_sources=(
+                    None
+                    if args.sweep_video_prediction_sources is None
+                    else parse_video_prediction_sources(args.sweep_video_prediction_sources)
+                ),
+            )
     except (FileNotFoundError, NotADirectoryError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"CADICA benchmark failed: {exc}", file=sys.stderr)
         return 2
@@ -335,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Frame F1: {_format_optional_float(frame_metrics['f1'])}")
     print(f"Box recall: {_format_optional_float(box_metrics['box_recall'])}")
     print(f"Summary: {result.outputs.summary_json}")
+    if sweep_outputs is not None:
+        print(f"Threshold sweep CSV: {sweep_outputs['cadica_threshold_sweep_csv']}")
+        print(f"Threshold sweep summary: {sweep_outputs['cadica_threshold_sweep_summary_json']}")
     if result.outputs.review_image_root is not None:
         print(f"Review images: {result.outputs.review_image_root}")
     return 0
