@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import csv
 from dataclasses import dataclass
 import itertools
@@ -57,6 +57,10 @@ class _SweepEvaluationJob:
     box_margin_px: float
     video_prediction_source: str
     multiview_min_score: float | None
+
+
+_WORKER_CONTEXT: dict[str, Any] = {}
+
 
 SWEEP_CSV_FIELDS = [
     "frame_min_degree",
@@ -261,19 +265,24 @@ def _evaluate_sweep_jobs(
                 progress.update(1)
         return rows
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
+    chunksize = max(1, len(jobs) // (workers * 4))
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_sweep_worker,
+        initargs=(
+            manifest,
+            frame_results_root,
+            output_root,
+            temporal_results_root,
+            multiview_results_root,
+            manifest_frames,
+            frame_predictions,
+        ),
+    ) as executor:
         row_iter = executor.map(
-            lambda job: _evaluate_sweep_job(
-                job,
-                manifest=manifest,
-                frame_results_root=frame_results_root,
-                output_root=output_root,
-                temporal_results_root=temporal_results_root,
-                multiview_results_root=multiview_results_root,
-                manifest_frames=manifest_frames,
-                frame_predictions=frame_predictions,
-            ),
+            _evaluate_sweep_job_from_worker,
             jobs,
+            chunksize=chunksize,
         )
         rows = []
         with tqdm(total=len(jobs), desc=description, unit="combo", dynamic_ncols=True) as progress:
@@ -281,6 +290,44 @@ def _evaluate_sweep_jobs(
                 rows.append(row)
                 progress.update(1)
     return rows
+
+
+def _init_sweep_worker(
+    manifest: Path,
+    frame_results_root: Path,
+    output_root: Path,
+    temporal_results_root: Path | None,
+    multiview_results_root: Path | None,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+) -> None:
+    _WORKER_CONTEXT.clear()
+    _WORKER_CONTEXT.update(
+        {
+            "manifest": manifest,
+            "frame_results_root": frame_results_root,
+            "output_root": output_root,
+            "temporal_results_root": temporal_results_root,
+            "multiview_results_root": multiview_results_root,
+            "manifest_frames": manifest_frames,
+            "frame_predictions": frame_predictions,
+        }
+    )
+
+
+def _evaluate_sweep_job_from_worker(job: _SweepEvaluationJob) -> dict[str, Any]:
+    if not _WORKER_CONTEXT:
+        raise RuntimeError("CADICA sweep worker was not initialized.")
+    return _evaluate_sweep_job(
+        job,
+        manifest=_WORKER_CONTEXT["manifest"],
+        frame_results_root=_WORKER_CONTEXT["frame_results_root"],
+        output_root=_WORKER_CONTEXT["output_root"],
+        temporal_results_root=_WORKER_CONTEXT["temporal_results_root"],
+        multiview_results_root=_WORKER_CONTEXT["multiview_results_root"],
+        manifest_frames=_WORKER_CONTEXT["manifest_frames"],
+        frame_predictions=_WORKER_CONTEXT["frame_predictions"],
+    )
 
 
 def _evaluate_sweep_job(
@@ -429,7 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=1,
-        help="Number of worker threads used to evaluate sweep combinations. Defaults to 1.",
+        help="Number of worker processes used to evaluate sweep combinations. Defaults to 1.",
     )
     return parser
 

@@ -323,5 +323,6 @@ Outputs:
 positive. `box_margin_px` controls the tolerance around CADICA GT boxes for
 point-in-box localization. `multiview_min_score` controls the minimum
 multi-view confidence/score required for a saved multi-view result to count as
-positive. `--workers` parallelizes evaluation of sweep combinations. The sweep
+positive. `--workers` parallelizes evaluation of sweep combinations across
+worker processes. The sweep
 reloads existing prediction JSONs only; it does not rerun the pipeline.

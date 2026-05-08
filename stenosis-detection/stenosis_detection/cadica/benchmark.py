@@ -419,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--sweep-workers",
         type=int,
         default=1,
-        help="Number of worker threads used when --write-threshold-sweep is enabled.",
+        help="Number of worker processes used when --write-threshold-sweep is enabled.",
     )
     return parser
 
