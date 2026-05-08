@@ -9,11 +9,16 @@ Top-level project folders:
 - `vessel-segmentation`
 - `stenosis-detection`
 
+Pipeline routes:
+
+- Route A: keyframes -> vessel segmentation -> radius stenosis detection -> temporal fusion -> multiview fusion.
+- Route B: keyframes -> YOLO stenosis detection -> temporal fusion -> multiview fusion.
+
 Pipeline stages:
 
 1. Keyframe extraction
-2. Vessel segmentation / mask generation
-3. Stenosis detection, temporal fusion, and multi-view fusion
+2. Vessel segmentation / mask generation for the vessel/radius route
+3. Frame-level stenosis detection, temporal fusion, and multi-view fusion
 
 Commands below use the root wrapper scripts and the subproject CLIs.
 The package names are `angio_keyframes`, `drive_seg`, and
@@ -105,6 +110,16 @@ work/
       view_02/
         view_temporal_fusion.json
         view_temporal_fusion_summary.png
+  yolo_frame_results/
+    case_001/
+      view_01/
+        slice_0003_stenosis_results.json
+        ...
+  yolo_temporal_results/
+    case_001/
+      view_01/
+        view_temporal_fusion.json
+        ...
 ```
 
 Stenosis-compatible masks must be stored in a tree that mirrors the image tree.
@@ -213,15 +228,17 @@ python vessel-segmentation/train.py --dataset-root path/to/Datasets/Coronary --t
 python vessel-segmentation/predict.py --dataset-root path/to/Datasets/Coronary --split test
 ```
 
-## Stage 3: Stenosis Detection
+## Stage 3A: Vessel/Radius Stenosis Detection
 
 Run frame-level stenosis detection with the keyframes as images and the mirrored
-vessel masks as masks.
+vessel masks as masks. This is the default route and preserves the original
+pipeline behavior.
 
 From the repository root:
 
 ```bash
 python scripts/run_stenosis_detection.py ^
+  --detector vessel ^
   --images-root work/keyframes ^
   --masks-root work/vessel_masks ^
   --output-root work/stenosis_frame_results
@@ -232,6 +249,7 @@ Equivalent command from the subproject folder:
 ```bash
 cd stenosis-detection
 python run_stenosis_detection.py ^
+  --detector vessel ^
   --images-root ../work/keyframes ^
   --masks-root ../work/vessel_masks ^
   --output-root ../work/stenosis_frame_results
@@ -255,6 +273,52 @@ The stenosis detector matches images and masks by mirrored relative path and
 mask stem. If the image is `slice_0003.png`, the mask must be named
 `slice_0003_mask.png`. CADICA names such as `p1_v1_00012.png` are accepted with
 matching masks such as `p1_v1_00012_mask.png`.
+
+## Stage 3B: YOLO Stenosis Detection
+
+YOLO can replace the vessel/radius frame detector. It reads keyframes directly,
+does not require masks, and writes frame-level JSONs compatible with temporal
+fusion. If `--masks-root` is provided, masks are used only to populate
+`skeleton_points` for registration support.
+
+Train a YOLO model with an Ultralytics-compatible dataset YAML:
+
+```bash
+python scripts/run_yolo_train.py ^
+  --data data/yolo_stenosis/data.yaml ^
+  --model yolov8x.pt ^
+  --imgsz 1024 ^
+  --epochs 100 ^
+  --project runs/stenosis ^
+  --name yolo_stenosis
+```
+
+Run YOLO frame inference:
+
+```bash
+python scripts/run_stenosis_detection.py ^
+  --detector yolo ^
+  --images-root work/keyframes ^
+  --yolo-weights runs/stenosis/yolo_stenosis/weights/best.pt ^
+  --output-root work/yolo_frame_results ^
+  --yolo-imgsz 1024 ^
+  --yolo-conf 0.25 ^
+  --yolo-iou 0.7 ^
+  --device 0 ^
+  --no-debug-images
+```
+
+YOLO outputs are mirrored under `--output-root`, for example:
+
+```text
+work/yolo_frame_results/case_001/view_01/slice_0003_stenosis_results.json
+work/yolo_frame_results/p1/v1/slice_00012_stenosis_results.json
+```
+
+YOLO bounding-box centers become stenosis points using 1-based x/y pixel
+coordinates. The JSON keeps `degree`, `severity`, `max_stenosis_degree`, and
+later `final_degree` fields for compatibility, but those values are
+confidence-derived scores rather than anatomical stenosis degree.
 
 ## Temporal Fusion
 
@@ -294,10 +358,20 @@ python scripts/run_temporal_fusion.py ^
   --output work/stenosis_temporal_results/case_001/view_01/view_temporal_fusion.json
 ```
 
+For YOLO frame outputs:
+
+```bash
+python scripts/run_temporal_fusion.py ^
+  --results-root work/yolo_frame_results ^
+  --output-root work/yolo_temporal_results ^
+  --skip-existing
+```
+
 ## Frame And Temporal Parameter Sweeps
 
 After keyframe extraction and vessel segmentation, you can run an optimized
-frame-level plus temporal-fusion parameter sweep from the repository root:
+vessel/radius frame-level plus temporal-fusion parameter sweep from the
+repository root:
 
 ```bash
 python scripts/run_stenosis_temporal_sweep.py \
@@ -339,6 +413,34 @@ segmentation when `--device cuda` is selected.
 
 `--run-multiview` adds a fixed multi-view pass after temporal fusion for each
 frame/temporal variant combination. It does not add multi-view hyperparameters.
+
+YOLO sweeps use YOLO confidence, NMS IoU, and inference image size as frame
+variant parameters and do not require vessel masks:
+
+```bash
+python scripts/run_stenosis_temporal_sweep.py \
+  --frame-detector yolo \
+  --images-root work/keyframes \
+  --yolo-weights runs/stenosis/yolo_stenosis/weights/best.pt \
+  --output-root work/yolo_sweep \
+  --yolo-conf-thresholds 0.15,0.25,0.35,0.45 \
+  --yolo-iou-thresholds 0.50,0.70 \
+  --yolo-imgsz-values 1024 \
+  --min-supporting-frames-values 1,2,3 \
+  --min-persistence-ratios 0.25,0.50 \
+  --allow-variable-frame-count \
+  --run-multiview \
+  --multiview-case-root-tree work/keyframes
+```
+
+YOLO sweep outputs use frame variant names such as:
+
+```text
+work/yolo_sweep/
+  frame_results/detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024/case_001/view_01/*_stenosis_results.json
+  temporal_results/detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024/min_supporting_frames_2__min_persistence_ratio_0p25/case_001/view_01/view_temporal_fusion.json
+  multiview_results/detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024/min_supporting_frames_2__min_persistence_ratio_0p25/case_001/case_multiview_fusion.json
+```
 
 ## Multi-View Fusion
 
@@ -401,6 +503,15 @@ python scripts/run_multiview_fusion.py ^
   --output-root work/case_results
 ```
 
+For YOLO temporal outputs:
+
+```bash
+python scripts/run_multiview_fusion.py ^
+  --case-root-tree work/keyframes ^
+  --temporal-results-root work/yolo_temporal_results ^
+  --output-root work/yolo_multiview_results
+```
+
 Expected output:
 
 - One case-level JSON containing `case_id`, `view_count`, `views`,
@@ -417,6 +528,8 @@ Expected output:
   such as `../work/keyframes`.
 - Omitting `--output-root` in batch stenosis detection. The batch command
   requires `--images-root`, `--masks-root`, and `--output-root`.
+- Passing `--masks-root` as if it were required for `--detector yolo`. YOLO can
+  run without masks; masks are optional skeleton support only.
 - Passing the original raw frames tree to stenosis detection after keyframe
   extraction. Stage 3 should usually use the keyframe output tree as
   `--images-root`.

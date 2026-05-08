@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from stenosis_detection.cadica.benchmark import run_cadica_benchmark
 from stenosis_detection.cadica.sweep import parse_float_list, run_cadica_threshold_sweep
+from stenosis_detection.yolo.schema import YoloDetection, YoloDetectorMetadata, build_yolo_frame_payload
 
 
 class CadicaThresholdSweepTests(unittest.TestCase):
@@ -86,6 +87,46 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             row = self._read_csv(output_root / "cadica_threshold_sweep.csv")[0]
             self.assertEqual(int(row["frame_total_evaluated"]), 2)
             self.assertEqual(int(row["frame_predicted_positive_count"]), 2)
+
+    def test_threshold_sweep_accepts_yolo_frame_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "yolo_frame_results"
+            output_root = temp_root / "sweep"
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        1,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 20, "h": 20, "category": "stenosis", "source_path": "gt/1.txt"}],
+                    )
+                ],
+            )
+            self._write_yolo_frame_result(
+                frame_results_root / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                confidence=0.83,
+            )
+
+            run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                output_root=output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+            )
+
+            row = self._read_csv(output_root / "cadica_threshold_sweep.csv")[0]
+            self.assertEqual(int(row["frame_TP"]), 1)
+            self.assertEqual(int(row["matched_gt_boxes"]), 1)
+            self.assertAlmostEqual(float(row["box_recall"]), 1.0)
 
     def test_temporal_final_source_requires_temporal_results_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -419,6 +460,43 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             },
             "stenosis_points": points,
         }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_yolo_frame_result(
+        self,
+        path: Path,
+        *,
+        patient_id: str,
+        video_id: str,
+        frame_id: int,
+        confidence: float,
+    ) -> None:
+        image_name = f"slice_{frame_id:05d}.png"
+        detection = YoloDetection(
+            bbox_xyxy_zero_based=(9.0, 9.0, 18.0, 18.0),
+            confidence=confidence,
+            class_id=0,
+            class_name="Stenosis",
+            image_width=512,
+            image_height=512,
+        )
+        payload = build_yolo_frame_payload(
+            image_path=Path("work/cadica_prepared/keyframes") / patient_id / video_id / image_name,
+            mask_path=None,
+            detector=YoloDetectorMetadata(
+                name="yolov8",
+                weights="runs/stenosis/best.pt",
+                imgsz=1024,
+                conf=0.25,
+                iou=0.7,
+                device="cpu",
+            ),
+            view_id=f"{patient_id}/{video_id}",
+            image_width=512,
+            image_height=512,
+            detections=[detection],
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 

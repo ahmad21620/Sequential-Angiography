@@ -18,10 +18,15 @@ from stenosis_detection.parameter_sweep import (
     _is_temporal_variant_complete,
     build_frame_sweep_variants,
     build_temporal_sweep_variants,
+    build_yolo_frame_sweep_variants,
     run_multiview_sweep,
+    run_parameter_sweep,
 )
 from stenosis_detection.pipeline import PipelineConfig
 from stenosis_detection.temporal import TemporalFusionConfig
+from stenosis_detection.yolo.inference import YoloBatchSummary
+from stenosis_detection.yolo.schema import YoloDetection, build_yolo_frame_payload
+import stenosis_detection.parameter_sweep as parameter_sweep_module
 
 
 class ParameterSweepTests(unittest.TestCase):
@@ -54,6 +59,110 @@ class ParameterSweepTests(unittest.TestCase):
             variants[-1].name,
             "min_supporting_frames_3__min_persistence_ratio_0p5",
         )
+
+    def test_build_yolo_frame_sweep_variants_crosses_yolo_parameters(self) -> None:
+        variants = build_yolo_frame_sweep_variants(
+            yolo_weights="best.pt",
+            yolo_conf_thresholds=[0.15, 0.25],
+            yolo_iou_thresholds=[0.50, 0.70],
+            yolo_imgsz_values=[1024],
+            device="0",
+        )
+
+        self.assertEqual(len(variants), 4)
+        self.assertIn(
+            "detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024",
+            [variant.name for variant in variants],
+        )
+        self.assertTrue(all(variant.detector == "yolo" for variant in variants))
+
+    def test_vessel_sweep_requires_masks_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            images_root = temp_root / "images"
+            images_root.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "masks_root is required"):
+                run_parameter_sweep(
+                    frame_detector="vessel",
+                    images_root=images_root,
+                    output_root=temp_root / "sweep",
+                )
+
+    def test_yolo_sweep_without_masks_creates_temporal_and_multiview_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            images_root = self._write_multiview_case_tree(temp_root / "cases", view_ids=["view_01"])
+            output_root = temp_root / "yolo_sweep"
+            frame_variant = "detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024"
+            temporal_variant = "min_supporting_frames_1__min_persistence_ratio_0p25"
+
+            original_process_yolo_tree = parameter_sweep_module.process_yolo_tree
+            calls = []
+            parameter_sweep_module.process_yolo_tree = self._fake_yolo_process_tree(calls)
+            try:
+                result = run_parameter_sweep(
+                    frame_detector="yolo",
+                    images_root=images_root,
+                    masks_root=None,
+                    output_root=output_root,
+                    yolo_weights="fake.pt",
+                    yolo_conf_thresholds=[0.25],
+                    yolo_iou_thresholds=[0.70],
+                    yolo_imgsz_values=[1024],
+                    min_supporting_frames_values=[1],
+                    min_persistence_ratios=[0.25],
+                    allow_variable_frame_count=True,
+                    run_multiview=True,
+                    multiview_case_root_tree=images_root,
+                    write_debug_images=False,
+                    write_temporal_images=False,
+                    workers=1,
+                    temporal_workers=1,
+                )
+            finally:
+                parameter_sweep_module.process_yolo_tree = original_process_yolo_tree
+
+            frame_json = (
+                output_root
+                / "frame_results"
+                / frame_variant
+                / "case_a"
+                / "view_01"
+                / "slice_0001_stenosis_results.json"
+            )
+            temporal_json = (
+                output_root
+                / "temporal_results"
+                / frame_variant
+                / temporal_variant
+                / "case_a"
+                / "view_01"
+                / "view_temporal_fusion.json"
+            )
+            multiview_json = (
+                output_root
+                / "multiview_results"
+                / frame_variant
+                / temporal_variant
+                / "case_a"
+                / "case_multiview_fusion.json"
+            )
+
+            self.assertTrue(frame_json.is_file())
+            self.assertTrue(temporal_json.is_file())
+            self.assertTrue(multiview_json.is_file())
+            self.assertEqual(result.frame_summary.failed, 0)
+            self.assertEqual(result.temporal_summary.failed_jobs, 0)
+            self.assertIsNotNone(result.multiview_summary)
+            self.assertEqual(result.multiview_summary.failed_cases, 0)
+            self.assertEqual(calls[0]["masks_root"], None)
+            self.assertEqual(calls[0]["output_root"], output_root / "frame_results" / frame_variant)
+
+            temporal_payload = json.loads(temporal_json.read_text(encoding="utf-8"))
+            self.assertEqual(temporal_payload["view_id"], "case_a/view_01")
+            multiview_payload = json.loads(multiview_json.read_text(encoding="utf-8"))
+            self.assertEqual(multiview_payload["case_id"], "case_a")
 
     def test_temporal_variant_complete_can_skip_summary_png_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -205,6 +314,67 @@ class ParameterSweepTests(unittest.TestCase):
             encoding="utf-8",
         )
         return case_root_tree
+
+    def _fake_yolo_process_tree(self, calls: list[dict[str, object]]):
+        def fake_process_yolo_tree(
+            jobs,
+            output_root,
+            *,
+            images_root,
+            masks_root=None,
+            config,
+            skip_existing=True,
+            workers=1,
+            write_review_images=False,
+            model=None,
+        ):
+            output_root = Path(output_root)
+            calls.append(
+                {
+                    "output_root": output_root,
+                    "masks_root": masks_root,
+                    "conf": config.conf,
+                    "iou": config.iou,
+                    "imgsz": config.imgsz,
+                }
+            )
+            for job in jobs:
+                detection = YoloDetection(
+                    bbox_xyxy_zero_based=(9.0, 9.0, 11.0, 11.0),
+                    confidence=float(config.conf),
+                    class_id=0,
+                    class_name="Stenosis",
+                    image_width=32,
+                    image_height=32,
+                )
+                payload = build_yolo_frame_payload(
+                    image_path=job.image_path,
+                    mask_path=job.mask_path,
+                    detector=config.detector_metadata(),
+                    image_width=32,
+                    image_height=32,
+                    view_id=job.relative_dir.as_posix(),
+                    skeleton_points_xy=[],
+                    detections=[detection],
+                )
+                output_path = output_root / job.relative_dir / f"{job.image_stem}_stenosis_results.json"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            return YoloBatchSummary(
+                images_root=Path(images_root),
+                masks_root=None if masks_root is None else Path(masks_root),
+                output_root=output_root,
+                total_jobs=len(jobs),
+                workers=1,
+                processed=len(jobs),
+                skipped_existing=0,
+                failed=0,
+                failures=[],
+                review_images_saved=write_review_images,
+            )
+
+        return fake_process_yolo_tree
 
     def _write_temporal_result(self, output_path: Path, *, view_id: str) -> None:
         output_path.parent.mkdir(parents=True)

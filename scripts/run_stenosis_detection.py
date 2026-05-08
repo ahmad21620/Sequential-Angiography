@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> None:
         mask_path = get_option_value(forwarded_args, "--mask")
         images_root = get_option_value(forwarded_args, "--images-root")
         masks_root = get_option_value(forwarded_args, "--masks-root")
+        yolo_weights = get_option_value(forwarded_args, "--yolo-weights")
 
         if image_path is not None:
             require_existing_path(image_path, "--image", kind="file")
@@ -26,6 +27,8 @@ def main(argv: list[str] | None = None) -> None:
             require_existing_path(images_root, "--images-root", kind="dir")
         if masks_root is not None:
             require_existing_path(masks_root, "--masks-root", kind="dir")
+        if yolo_weights is not None:
+            require_existing_path(yolo_weights, "--yolo-weights", kind="file")
 
     run_existing_script("stenosis-detection/run_stenosis_detection.py", forwarded_args)
 

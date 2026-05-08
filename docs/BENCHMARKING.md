@@ -5,6 +5,11 @@ against external EHR weak labels. The benchmark tools read JSON outputs that
 already exist on disk. They do not rerun frame detection, temporal fusion, or
 multi-view fusion, and they do not modify pipeline JSON schemas.
 
+Both detector routes are supported:
+
+- Route A: keyframes -> vessel segmentation -> radius stenosis detection -> temporal fusion -> multiview fusion.
+- Route B: keyframes -> YOLO stenosis detection -> temporal fusion -> multiview fusion.
+
 For supervised CADICA benchmarking against CADICA frame annotations, use the
 separate workflow in [CADICA_BENCHMARKING.md](CADICA_BENCHMARKING.md).
 
@@ -71,6 +76,10 @@ For each frame JSON:
   max stenosis degree is at least `--frame-min-degree`.
 - `score` is the max stenosis degree for that frame.
 - `predicted_severity` is the worst severity among detected stenosis points.
+
+For YOLO frame JSONs, the same fields are present for compatibility. The values
+named `degree`, `score`, and `max_stenosis_degree` are confidence-derived scores
+copied from YOLO confidence, not anatomical stenosis degree.
 
 Frame outputs include:
 
@@ -232,8 +241,29 @@ Sweep score sources:
 - Temporal: final lesion median degree and persistence ratio.
 - Multi-view: confidence score and final case lesion total score when present.
 
+For YOLO sweeps, frame and downstream degree-compatible columns are
+confidence-derived scores. Treat `--frame-min-degree` and threshold-sweep
+operating points as confidence thresholds when evaluating YOLO outputs.
+
 Threshold sweeps are analysis reports only. They do not update detector,
 temporal fusion, or multi-view fusion parameters.
+
+## Sweep Benchmarking
+
+After a full YOLO parameter sweep, benchmark all levels without rerunning the
+pipeline:
+
+```bash
+python scripts/run_sweep_benchmark.py \
+  --sweep-root work/yolo_sweep \
+  --weak-labels work/weak_labels.jsonl \
+  --output-root work/yolo_sweep/benchmark_results \
+  --levels frame temporal multiview \
+  --write-threshold-sweep
+```
+
+The same command structure works for vessel/radius sweeps by changing
+`--sweep-root` to the vessel sweep output root.
 
 ## Final Sweep Benchmark Report
 
@@ -256,6 +286,13 @@ This report is for final binary stenosis detection metrics. It ignores
 severity-related summaries and level-of-stenosis statistics. Multi-view is the
 primary final case-level result. Frame and temporal summaries are included only
 as comparison stages.
+
+For YOLO sweeps, final report tables include `detector`, `yolo_conf`,
+`yolo_iou`, and `yolo_imgsz`. Vessel-only heatmaps are skipped when those vessel
+parameters are absent, and YOLO reports include confidence-threshold plots such
+as F1 vs `yolo_conf` and precision/recall vs `yolo_conf`. Any column named
+`final_degree` or `max_stenosis_degree` remains for schema compatibility and is
+reported as a confidence-derived score for YOLO.
 
 When the sweep used `--multiview-split-by-coronary-side`, left and right side
 fusion outputs are combined into one case-level binary prediction. A case is

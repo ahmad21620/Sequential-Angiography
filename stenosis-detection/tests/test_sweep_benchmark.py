@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from run_sweep_benchmark import run_sweep_benchmark
+from stenosis_detection.yolo.schema import YoloDetection, YoloDetectorMetadata, build_yolo_frame_payload
 
 
 class SweepBenchmarkTests(unittest.TestCase):
@@ -83,6 +84,47 @@ class SweepBenchmarkTests(unittest.TestCase):
             )
             self.assertTrue((output_root / "sweep_benchmark_summary.json").is_file())
 
+    def test_run_sweep_benchmark_accepts_yolo_frame_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            sweep_root = temp_root / "yolo_sweep"
+            weak_labels = temp_root / "weak_labels.jsonl"
+            output_root = temp_root / "benchmark"
+            frame_variant = "detector_yolo__yolo_conf_0p25__yolo_iou_0p70__yolo_imgsz_1024"
+
+            _write_weak_labels(weak_labels)
+            _write_yolo_frame_result(
+                sweep_root
+                / "frame_results"
+                / frame_variant
+                / "case_1"
+                / "view_1"
+                / "slice_0001_stenosis_results.json"
+            )
+
+            summary = run_sweep_benchmark(
+                sweep_root=sweep_root,
+                weak_labels_path=weak_labels,
+                output_root=output_root,
+                levels=("frame",),
+                write_threshold_sweep_report=True,
+            )
+
+            self.assertEqual(summary["completed_jobs"], 1)
+            self.assertEqual(summary["failed_jobs"], 0)
+            frame_summary = json.loads(
+                (output_root / "frame" / frame_variant / "frame_summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(frame_summary["summary"]["TP"], 1)
+            self.assertTrue((output_root / "frame" / frame_variant / "threshold_sweep_frame.csv").is_file())
+            frame_rows = [
+                json.loads(line)
+                for line in (output_root / "frame" / frame_variant / "frame_rows.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(frame_rows[0]["score"], 0.83)
+            self.assertEqual(frame_rows[0]["max_stenosis_degree"], 0.83)
+
 
 def _write_weak_labels(path: Path) -> None:
     path.write_text(
@@ -117,6 +159,35 @@ def _write_frame_result(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_yolo_frame_result(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    detection = YoloDetection(
+        bbox_xyxy_zero_based=(99.0, 199.0, 144.0, 239.0),
+        confidence=0.83,
+        class_id=0,
+        class_name="Stenosis",
+        image_width=512,
+        image_height=512,
+    )
+    payload = build_yolo_frame_payload(
+        image_path=Path("work/keyframes/case_1/view_1/slice_0001.png"),
+        mask_path=None,
+        detector=YoloDetectorMetadata(
+            name="yolov8",
+            weights="runs/stenosis/best.pt",
+            imgsz=1024,
+            conf=0.25,
+            iou=0.7,
+            device="cpu",
+        ),
+        view_id="case_1/view_1",
+        image_width=512,
+        image_height=512,
+        detections=[detection],
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _write_temporal_result(path: Path) -> None:

@@ -35,6 +35,12 @@ from .temporal import (
     save_view_level_result,
     save_view_visualization_outputs,
 )
+from .yolo.inference import (
+    YoloBatchFailure,
+    YoloInferenceConfig,
+    discover_yolo_tree_jobs,
+    process_yolo_tree,
+)
 
 try:
     from tqdm.auto import tqdm
@@ -77,7 +83,8 @@ except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
 @dataclass(frozen=True, slots=True)
 class FrameSweepVariant:
     name: str
-    config: PipelineConfig
+    config: PipelineConfig | YoloInferenceConfig
+    detector: str = "vessel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,21 +177,60 @@ class ParameterSweepResult:
     multiview_results_root: Path | None
     frame_variants: tuple[FrameSweepVariant, ...]
     temporal_variants: tuple[TemporalSweepVariant, ...]
-    frame_summary: BatchProcessSummary
+    frame_summary: BatchProcessSummary | "YoloFrameSweepSummary"
     temporal_summary: TemporalSweepSummary
     multiview_summary: MultiViewSweepSummary | None
     summary_json: Path
 
 
+@dataclass(frozen=True, slots=True)
+class YoloFrameSweepSummary:
+    images_root: Path
+    masks_root: Path | None
+    output_root: Path
+    total_jobs: int
+    workers: int
+    processed: int
+    skipped_existing: int
+    failed: int
+    failures: tuple[YoloBatchFailure, ...]
+    frame_variants: tuple[str, ...]
+    variant_summaries: tuple[dict[str, Any], ...]
+    review_images_saved: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "detector": "yolo",
+            "images_root": str(self.images_root),
+            "masks_root": None if self.masks_root is None else str(self.masks_root),
+            "output_root": str(self.output_root),
+            "total_jobs": self.total_jobs,
+            "workers": self.workers,
+            "processed": self.processed,
+            "skipped_existing": self.skipped_existing,
+            "failed": self.failed,
+            "failures": [asdict(failure) for failure in self.failures],
+            "frame_variants": list(self.frame_variants),
+            "variant_summaries": list(self.variant_summaries),
+            "review_images_saved": self.review_images_saved,
+        }
+
+
 def run_parameter_sweep(
     *,
     images_root: str | Path,
-    masks_root: str | Path,
+    masks_root: str | Path | None = None,
     output_root: str | Path,
+    frame_detector: str = "vessel",
     stenosis_thresholds: list[float] | None = None,
     average_radius_thresholds: list[float] | None = None,
     radius_outside_fraction_thresholds: list[float] | None = None,
     radius_min_outside_samples_values: list[int] | None = None,
+    yolo_weights: str | Path | None = None,
+    yolo_conf_thresholds: list[float] | None = None,
+    yolo_iou_thresholds: list[float] | None = None,
+    yolo_imgsz_values: list[int] | None = None,
+    yolo_device: str | None = None,
     min_supporting_frames_values: list[int] | None = None,
     min_persistence_ratios: list[float] | None = None,
     base_config: PipelineConfig | None = None,
@@ -203,38 +249,67 @@ def run_parameter_sweep(
     multiview_output_root: str | Path | None = None,
     multiview_config: MultiViewFusionConfig | None = None,
     split_multiview_by_coronary_side: bool = False,
+    write_yolo_review_images: bool = False,
 ) -> ParameterSweepResult:
     if video_format not in VIDEO_FORMATS:
         raise ValueError(f"video_format must be one of {VIDEO_FORMATS}, got {video_format!r}.")
+    if frame_detector not in {"vessel", "yolo"}:
+        raise ValueError("frame_detector must be either 'vessel' or 'yolo'.")
+    if frame_detector == "vessel" and masks_root is None:
+        raise ValueError("masks_root is required when frame_detector='vessel'.")
+    if frame_detector == "yolo" and yolo_weights is None:
+        raise ValueError("yolo_weights is required when frame_detector='yolo'.")
 
     resolved_output_root = Path(output_root)
     frame_results_root = resolved_output_root / "frame_results"
     temporal_results_root = resolved_output_root / "temporal_results"
     pipeline_config = base_config or PipelineConfig()
-    frame_variants = build_frame_sweep_variants(
-        pipeline_config,
-        stenosis_thresholds=stenosis_thresholds,
-        average_radius_thresholds=average_radius_thresholds,
-        radius_outside_fraction_thresholds=radius_outside_fraction_thresholds,
-        radius_min_outside_samples_values=radius_min_outside_samples_values,
-    )
+    if frame_detector == "vessel":
+        frame_variants = build_frame_sweep_variants(
+            pipeline_config,
+            stenosis_thresholds=stenosis_thresholds,
+            average_radius_thresholds=average_radius_thresholds,
+            radius_outside_fraction_thresholds=radius_outside_fraction_thresholds,
+            radius_min_outside_samples_values=radius_min_outside_samples_values,
+        )
+    else:
+        frame_variants = build_yolo_frame_sweep_variants(
+            yolo_weights=yolo_weights,
+            yolo_conf_thresholds=yolo_conf_thresholds,
+            yolo_iou_thresholds=yolo_iou_thresholds,
+            yolo_imgsz_values=yolo_imgsz_values,
+            device=yolo_device,
+            mask_threshold=pipeline_config.mask_threshold,
+        )
     temporal_variants = build_temporal_sweep_variants(
         min_supporting_frames_values=min_supporting_frames_values,
         min_persistence_ratios=min_persistence_ratios,
     )
 
-    jobs = discover_tree_jobs(images_root, masks_root)
-    frame_summary = process_tree(
-        jobs,
-        frame_results_root,
-        images_root=images_root,
-        masks_root=masks_root,
-        config=frame_variants[0].config,
-        skip_existing=skip_existing,
-        workers=workers,
-        threshold_variants=[(variant.name, variant.config) for variant in frame_variants],
-        write_debug_images=write_debug_images,
-    )
+    if frame_detector == "vessel":
+        assert masks_root is not None
+        jobs = discover_tree_jobs(images_root, masks_root)
+        frame_summary = process_tree(
+            jobs,
+            frame_results_root,
+            images_root=images_root,
+            masks_root=masks_root,
+            config=frame_variants[0].config,
+            skip_existing=skip_existing,
+            workers=workers,
+            threshold_variants=[(variant.name, variant.config) for variant in frame_variants],
+            write_debug_images=write_debug_images,
+        )
+    else:
+        frame_summary = run_yolo_frame_sweep(
+            images_root=images_root,
+            masks_root=masks_root,
+            frame_results_root=frame_results_root,
+            frame_variants=frame_variants,
+            skip_existing=skip_existing,
+            workers=workers,
+            write_review_images=write_yolo_review_images,
+        )
     temporal_summary = run_temporal_sweep(
         frame_results_root=frame_results_root,
         temporal_results_root=temporal_results_root,
@@ -273,7 +348,7 @@ def run_parameter_sweep(
         json.dumps(
             _sweep_summary_payload(
                 images_root=Path(images_root),
-                masks_root=Path(masks_root),
+                masks_root=None if masks_root is None else Path(masks_root),
                 output_root=resolved_output_root,
                 frame_results_root=frame_results_root,
                 temporal_results_root=temporal_results_root,
@@ -297,6 +372,7 @@ def run_parameter_sweep(
                 ),
                 multiview_config=MultiViewFusionConfig() if multiview_config is None else multiview_config,
                 split_multiview_by_coronary_side=split_multiview_by_coronary_side,
+                frame_detector=frame_detector,
             ),
             indent=2,
             sort_keys=True,
@@ -363,6 +439,51 @@ def build_frame_sweep_variants(
     return variants
 
 
+def build_yolo_frame_sweep_variants(
+    *,
+    yolo_weights: str | Path | None,
+    yolo_conf_thresholds: list[float] | None = None,
+    yolo_iou_thresholds: list[float] | None = None,
+    yolo_imgsz_values: list[int] | None = None,
+    device: str | None = None,
+    mask_threshold: int | None = None,
+) -> list[FrameSweepVariant]:
+    if yolo_weights is None:
+        raise ValueError("yolo_weights is required for YOLO frame sweeps.")
+
+    resolved_conf_thresholds = yolo_conf_thresholds or [0.25]
+    resolved_iou_thresholds = yolo_iou_thresholds or [0.70]
+    resolved_imgsz_values = yolo_imgsz_values or [1024]
+
+    variants: list[FrameSweepVariant] = []
+    for conf_threshold in resolved_conf_thresholds:
+        if not 0.0 <= conf_threshold <= 1.0:
+            raise ValueError("yolo_conf_threshold values must be in the range [0.0, 1.0].")
+        for iou_threshold in resolved_iou_thresholds:
+            if not 0.0 <= iou_threshold <= 1.0:
+                raise ValueError("yolo_iou_threshold values must be in the range [0.0, 1.0].")
+            for imgsz in resolved_imgsz_values:
+                if imgsz < 1:
+                    raise ValueError("yolo_imgsz values must be >= 1.")
+                config = YoloInferenceConfig(
+                    weights=str(yolo_weights),
+                    imgsz=int(imgsz),
+                    conf=float(conf_threshold),
+                    iou=float(iou_threshold),
+                    device=device,
+                    mask_threshold=PipelineConfig().mask_threshold if mask_threshold is None else mask_threshold,
+                )
+                variants.append(
+                    FrameSweepVariant(
+                        name=yolo_frame_variant_name(config),
+                        config=config,
+                        detector="yolo",
+                    )
+                )
+    _validate_unique_names([variant.name for variant in variants], "YOLO frame variant")
+    return variants
+
+
 def build_temporal_sweep_variants(
     *,
     min_supporting_frames_values: list[int] | None = None,
@@ -390,6 +511,69 @@ def build_temporal_sweep_variants(
             )
     _validate_unique_names([variant.name for variant in variants], "temporal variant")
     return variants
+
+
+def run_yolo_frame_sweep(
+    *,
+    images_root: str | Path,
+    masks_root: str | Path | None,
+    frame_results_root: str | Path,
+    frame_variants: list[FrameSweepVariant],
+    skip_existing: bool,
+    workers: int,
+    write_review_images: bool,
+) -> YoloFrameSweepSummary:
+    yolo_variants = [variant for variant in frame_variants if variant.detector == "yolo"]
+    if len(yolo_variants) != len(frame_variants):
+        raise ValueError("run_yolo_frame_sweep received non-YOLO frame variants.")
+
+    resolved_frame_results_root = Path(frame_results_root)
+    jobs = discover_yolo_tree_jobs(images_root, masks_root=masks_root)
+    variant_summaries: list[dict[str, Any]] = []
+    failures: list[YoloBatchFailure] = []
+    total_jobs = 0
+    processed = 0
+    skipped_existing = 0
+    failed = 0
+    resolved_workers = 1
+
+    for variant in yolo_variants:
+        if not isinstance(variant.config, YoloInferenceConfig):
+            raise ValueError(f"YOLO frame variant {variant.name!r} has an invalid config type.")
+        summary = process_yolo_tree(
+            jobs,
+            output_root=resolved_frame_results_root / variant.name,
+            images_root=images_root,
+            masks_root=masks_root,
+            config=variant.config,
+            skip_existing=skip_existing,
+            workers=workers,
+            write_review_images=write_review_images,
+        )
+        summary_payload = summary.to_dict()
+        summary_payload["variant_name"] = variant.name
+        variant_summaries.append(summary_payload)
+        total_jobs += summary.total_jobs
+        processed += summary.processed
+        skipped_existing += summary.skipped_existing
+        failed += summary.failed
+        failures.extend(summary.failures)
+        resolved_workers = summary.workers
+
+    return YoloFrameSweepSummary(
+        images_root=Path(images_root),
+        masks_root=None if masks_root is None else Path(masks_root),
+        output_root=resolved_frame_results_root,
+        total_jobs=total_jobs,
+        workers=resolved_workers,
+        processed=processed,
+        skipped_existing=skipped_existing,
+        failed=failed,
+        failures=tuple(failures),
+        frame_variants=tuple(variant.name for variant in yolo_variants),
+        variant_summaries=tuple(variant_summaries),
+        review_images_saved=write_review_images,
+    )
 
 
 def run_temporal_sweep(
@@ -573,6 +757,15 @@ def frame_variant_name(config: PipelineConfig) -> str:
         f"__radius_min_outside_samples_{config.radius_min_outside_samples}"
         f"__stenosis_threshold_{_format_value(config.stenosis_threshold)}"
         f"__average_radius_threshold_{_format_value(config.average_radius_threshold)}"
+    )
+
+
+def yolo_frame_variant_name(config: YoloInferenceConfig) -> str:
+    return (
+        f"detector_yolo"
+        f"__yolo_conf_{_format_yolo_threshold(config.conf)}"
+        f"__yolo_iou_{_format_yolo_threshold(config.iou)}"
+        f"__yolo_imgsz_{config.imgsz}"
     )
 
 
@@ -777,7 +970,7 @@ def _write_job_messages(result: TemporalSweepJobResult, *, log=print) -> None:
 def _sweep_summary_payload(
     *,
     images_root: Path,
-    masks_root: Path,
+    masks_root: Path | None,
     output_root: Path,
     frame_results_root: Path,
     temporal_results_root: Path,
@@ -799,11 +992,12 @@ def _sweep_summary_payload(
     multiview_case_root_tree: Path,
     multiview_config: MultiViewFusionConfig,
     split_multiview_by_coronary_side: bool,
+    frame_detector: str,
 ) -> dict[str, Any]:
     return {
         "inputs": {
             "images_root": str(images_root),
-            "masks_root": str(masks_root),
+            "masks_root": None if masks_root is None else str(masks_root),
         },
         "outputs": {
             "output_root": str(output_root),
@@ -812,6 +1006,7 @@ def _sweep_summary_payload(
             "multiview_results_root": None if multiview_results_root is None else str(multiview_results_root),
         },
         "config": {
+            "frame_detector": frame_detector,
             "allow_variable_frame_count": allow_variable_frame_count,
             "expected_frame_count": expected_frame_count,
             "skip_existing": skip_existing,
@@ -826,7 +1021,7 @@ def _sweep_summary_payload(
             "split_multiview_by_coronary_side": split_multiview_by_coronary_side,
         },
         "frame_variants": [
-            {"name": variant.name, "config": asdict(variant.config)}
+            {"name": variant.name, "detector": variant.detector, "config": asdict(variant.config)}
             for variant in frame_variants
         ],
         "temporal_variants": [
@@ -841,6 +1036,10 @@ def _sweep_summary_payload(
 
 def _format_value(value: float | int) -> str:
     return f"{value:g}".replace("-", "minus_").replace(".", "p")
+
+
+def _format_yolo_threshold(value: float) -> str:
+    return f"{value:.2f}".replace("-", "minus_").replace(".", "p")
 
 
 def _validate_unique_names(names: list[str], label: str) -> None:

@@ -31,10 +31,26 @@ class SweepReportTests(unittest.TestCase):
             "__average_radius_threshold_4"
         )
 
+        self.assertEqual(parsed["detector"], "vessel")
         self.assertEqual(parsed["radius_outside_fraction_threshold"], 0.1)
         self.assertEqual(parsed["radius_min_outside_samples"], 2)
         self.assertEqual(parsed["stenosis_threshold"], 0.25)
         self.assertEqual(parsed["average_radius_threshold"], 4.0)
+
+    def test_parse_yolo_frame_variant_name(self) -> None:
+        parsed = parse_frame_variant(
+            "detector_yolo"
+            "__yolo_conf_0p25"
+            "__yolo_iou_0p70"
+            "__yolo_imgsz_1024"
+        )
+
+        self.assertEqual(parsed["detector"], "yolo")
+        self.assertEqual(parsed["yolo_conf"], 0.25)
+        self.assertEqual(parsed["yolo_iou"], 0.70)
+        self.assertEqual(parsed["yolo_imgsz"], 1024)
+        self.assertIsNone(parsed["stenosis_threshold"])
+        self.assertIsNone(parsed["average_radius_threshold"])
 
     def test_parse_temporal_variant_name(self) -> None:
         parsed = parse_temporal_variant("min_supporting_frames_2__min_persistence_ratio_0p2")
@@ -167,6 +183,96 @@ class SweepReportTests(unittest.TestCase):
                 summary_payload["stage_progression"][1]["temporal_variant"],
                 temporal_variant,
             )
+
+    def test_yolo_report_skips_vessel_heatmaps_and_writes_yolo_plots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            sweep_root = temp_root / "yolo_sweep"
+            benchmark_root = sweep_root / "benchmark_results"
+            output_root = temp_root / "final_report"
+            best_frame_variant = (
+                "detector_yolo"
+                "__yolo_conf_0p25"
+                "__yolo_iou_0p70"
+                "__yolo_imgsz_1024"
+            )
+            higher_conf_variant = (
+                "detector_yolo"
+                "__yolo_conf_0p35"
+                "__yolo_iou_0p70"
+                "__yolo_imgsz_1024"
+            )
+            lower_iou_variant = (
+                "detector_yolo"
+                "__yolo_conf_0p25"
+                "__yolo_iou_0p50"
+                "__yolo_imgsz_1024"
+            )
+            temporal_variant = "min_supporting_frames_1__min_persistence_ratio_0p25"
+            sweep_root.mkdir()
+
+            self._write_summary(
+                benchmark_root / "frame" / best_frame_variant / "frame_summary.json",
+                tp=2,
+                fp=0,
+                tn=2,
+                fn=0,
+            )
+            self._write_summary(
+                benchmark_root / "temporal" / best_frame_variant / temporal_variant / "temporal_sequence_summary.json",
+                tp=2,
+                fp=0,
+                tn=2,
+                fn=0,
+            )
+            best_multiview_root = benchmark_root / "multiview" / best_frame_variant / temporal_variant
+            self._write_summary(
+                best_multiview_root / "multiview_case_summary.json",
+                tp=2,
+                fp=0,
+                tn=2,
+                fn=0,
+            )
+            self._write_case_rows(best_multiview_root / "multiview_case_rows.csv")
+            self._write_summary(
+                benchmark_root / "multiview" / higher_conf_variant / temporal_variant / "multiview_case_summary.json",
+                tp=1,
+                fp=0,
+                tn=2,
+                fn=1,
+            )
+            self._write_summary(
+                benchmark_root / "multiview" / lower_iou_variant / temporal_variant / "multiview_case_summary.json",
+                tp=1,
+                fp=1,
+                tn=1,
+                fn=1,
+            )
+
+            artifacts = run_sweep_report(
+                sweep_root=sweep_root,
+                output_root=output_root,
+                top_k=2,
+            )
+
+            self.assertTrue((output_root / "plots" / "08_yolo_conf_f1.png").is_file())
+            self.assertTrue((output_root / "plots" / "09_yolo_conf_precision_recall.png").is_file())
+            self.assertTrue((output_root / "plots" / "10_yolo_iou_comparison.png").is_file())
+            self.assertFalse((output_root / "plots" / "06_frame_threshold_heatmap.png").exists())
+            self.assertFalse((output_root / "plots" / "07_radius_parameter_heatmap.png").exists())
+            warning_text = "\n".join(artifacts.warnings)
+            self.assertIn("Skipped vessel frame-threshold heatmap", warning_text)
+            self.assertIn("Skipped vessel radius-parameter heatmap", warning_text)
+
+            all_rows = self._read_csv(output_root / "tables" / "all_variant_metrics.csv")
+            self.assertIn("detector", all_rows[0])
+            self.assertIn("yolo_conf", all_rows[0])
+            self.assertIn("yolo_iou", all_rows[0])
+            self.assertIn("yolo_imgsz", all_rows[0])
+            report_text = artifacts.reports["markdown"].read_text(encoding="utf-8").lower()
+            summary_payload = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+            self.assertIn("confidence-derived score", report_text)
+            self.assertIn("confidence-derived score", summary_payload["score_semantics"].lower())
 
     def _variant(
         self,

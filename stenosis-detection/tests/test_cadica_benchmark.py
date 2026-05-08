@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from stenosis_detection.cadica.benchmark import run_cadica_benchmark
+from stenosis_detection.yolo.schema import YoloDetection, YoloDetectorMetadata, build_yolo_frame_payload
 
 
 class CadicaBenchmarkTests(unittest.TestCase):
@@ -133,6 +134,50 @@ class CadicaBenchmarkTests(unittest.TestCase):
             self.assertEqual(len(self._read_csv(output_root / "false_negative_frames.csv")), 0)
             self.assertEqual(len(self._read_csv(output_root / "missed_gt_boxes.csv")), 1)
             self.assertEqual(len(self._read_csv(output_root / "unmatched_predicted_points.csv")), 2)
+
+    def test_cadica_benchmark_accepts_yolo_frame_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "yolo_frame_results"
+            output_root = temp_root / "benchmark"
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        1,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 20, "h": 20, "category": "stenosis", "source_path": "gt/1.txt"}],
+                    )
+                ],
+            )
+            self._write_yolo_frame_result(
+                frame_results_root / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                confidence=0.83,
+            )
+
+            result = run_cadica_benchmark(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                output_root=output_root,
+                frame_min_degree=0.5,
+                box_margin_px=0,
+                video_prediction_source="frame_any",
+            )
+
+            frame_row = result.frame_rows[0]
+            self.assertEqual(frame_row["outcome"], "TP")
+            self.assertTrue(frame_row["localized_positive"])
+            self.assertEqual(frame_row["matched_gt_box_count"], 1)
+            self.assertAlmostEqual(frame_row["score"] or 0.0, 0.83)
+            self.assertEqual(result.summary["frame_binary_metrics"]["TP"], 1)
+            self.assertEqual(result.summary["box_detection_metrics"]["matched_gt_boxes"], 1)
 
     def test_review_images_are_written_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -290,6 +335,43 @@ class CadicaBenchmarkTests(unittest.TestCase):
             },
             "stenosis_points": points,
         }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_yolo_frame_result(
+        self,
+        path: Path,
+        *,
+        patient_id: str,
+        video_id: str,
+        frame_id: int,
+        confidence: float,
+    ) -> None:
+        image_name = f"slice_{frame_id:05d}.png"
+        detection = YoloDetection(
+            bbox_xyxy_zero_based=(9.0, 9.0, 18.0, 18.0),
+            confidence=confidence,
+            class_id=0,
+            class_name="Stenosis",
+            image_width=512,
+            image_height=512,
+        )
+        payload = build_yolo_frame_payload(
+            image_path=Path("work/cadica_prepared/keyframes") / patient_id / video_id / image_name,
+            mask_path=None,
+            detector=YoloDetectorMetadata(
+                name="yolov8",
+                weights="runs/stenosis/best.pt",
+                imgsz=1024,
+                conf=0.25,
+                iou=0.7,
+                device="cpu",
+            ),
+            view_id=f"{patient_id}/{video_id}",
+            image_width=512,
+            image_height=512,
+            detections=[detection],
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 

@@ -10,19 +10,16 @@ def main(argv: list[str] | None = None) -> None:
     if not has_help_flag(forwarded_args):
         images_root = get_option_value(forwarded_args, "--images-root")
         masks_root = get_option_value(forwarded_args, "--masks-root")
-        multiview_case_root_tree = get_option_value(forwarded_args, "--multiview-case-root-tree")
-        yolo_weights = get_option_value(forwarded_args, "--yolo-weights")
+        weights = get_option_value(forwarded_args, "--weights")
 
         if images_root is not None:
             require_existing_path(images_root, "--images-root", kind="dir")
         if masks_root is not None:
             require_existing_path(masks_root, "--masks-root", kind="dir")
-        if multiview_case_root_tree is not None:
-            require_existing_path(multiview_case_root_tree, "--multiview-case-root-tree", kind="dir")
-        if yolo_weights is not None:
-            require_existing_path(yolo_weights, "--yolo-weights", kind="file")
+        if weights is not None:
+            require_existing_path(weights, "--weights", kind="file")
 
-    run_existing_script("stenosis-detection/run_stenosis_temporal_sweep.py", forwarded_args)
+    run_existing_script("stenosis-detection/run_yolo_stenosis_detection.py", forwarded_args)
 
 
 if __name__ == "__main__":

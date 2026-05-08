@@ -14,8 +14,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run an optimized frame-level and temporal-fusion parameter sweep.",
     )
+    parser.add_argument(
+        "--frame-detector",
+        choices=["vessel", "yolo"],
+        default="vessel",
+        help="Frame-level detector used to produce sweep frame results. Default: vessel.",
+    )
     parser.add_argument("--images-root", required=True, help="Root containing extracted keyframe images.")
-    parser.add_argument("--masks-root", required=True, help="Root containing mirrored vessel masks.")
+    parser.add_argument(
+        "--masks-root",
+        help="Root containing mirrored vessel masks. Required for --frame-detector vessel; optional skeleton support for YOLO.",
+    )
     parser.add_argument("--output-root", required=True, help="Root where sweep outputs will be written.")
     parser.add_argument(
         "--workers",
@@ -87,6 +96,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--average-radius-thresholds", help="Comma-separated average-radius thresholds.")
     parser.add_argument("--radius-outside-fraction-thresholds", help="Comma-separated radius outside-fraction thresholds.")
     parser.add_argument("--radius-min-outside-samples-values", help="Comma-separated radius minimum outside-sample counts.")
+    parser.add_argument("--yolo-weights", help="YOLOv8 weights used when --frame-detector yolo.")
+    parser.add_argument("--yolo-conf-thresholds", help="Comma-separated YOLO confidence thresholds.")
+    parser.add_argument("--yolo-iou-thresholds", help="Comma-separated YOLO NMS IoU thresholds.")
+    parser.add_argument("--yolo-imgsz-values", help="Comma-separated YOLO inference image sizes.")
+    parser.add_argument("--device", help="Device string passed to Ultralytics for YOLO frame sweeps.")
+    parser.add_argument(
+        "--save-review-images",
+        action="store_true",
+        help="For YOLO frame sweeps, also write bbox review PNGs next to JSON outputs.",
+    )
     parser.add_argument("--min-supporting-frames-values", help="Comma-separated temporal minimum supporting-frame counts.")
     parser.add_argument("--min-persistence-ratios", help="Comma-separated temporal minimum persistence ratios.")
 
@@ -110,7 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_args)
     if args.workers < 0:
         parser.error("--workers must be 0 or greater.")
     if args.temporal_workers < 0:
@@ -119,22 +139,87 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--expected-frame-count must be at least 1.")
     if args.video_fps <= 0.0:
         parser.error("--video-fps must be positive.")
+    if args.save_review_images and args.no_debug_images:
+        parser.error("--save-review-images cannot be used with --no-debug-images.")
+    if args.frame_detector == "vessel" and args.masks_root is None:
+        parser.error("--masks-root is required when --frame-detector vessel.")
+    if args.frame_detector == "yolo" and args.yolo_weights is None:
+        parser.error("--yolo-weights is required when --frame-detector yolo.")
+    if args.frame_detector == "yolo" and args.yolo_weights is not None and not Path(args.yolo_weights).is_file():
+        parser.error(f"--yolo-weights is not a file: {args.yolo_weights}")
+    if args.frame_detector == "yolo":
+        _warn_ignored_options(
+            raw_args,
+            {
+                "--stenosis-thresholds",
+                "--average-radius-thresholds",
+                "--radius-outside-fraction-thresholds",
+                "--radius-min-outside-samples-values",
+                "--radius-search-range",
+                "--radius-vessel-threshold",
+                "--segmentation-distance-threshold",
+                "--final-point-distance-threshold",
+                "--branch-point-exclusion-distance",
+                "--min-component-area",
+                "--remove-border-artifacts",
+                "--no-remove-border-artifacts",
+                "--border-margin-px",
+                "--border-artifact-max-height",
+                "--border-artifact-min-width-ratio",
+            },
+            "--frame-detector yolo ignores vessel-mask/radius-specific options",
+        )
 
     try:
+        yolo_conf_thresholds = (
+            _parse_float_list(args.yolo_conf_thresholds, "--yolo-conf-thresholds")
+            if args.frame_detector == "yolo"
+            else None
+        )
+        yolo_iou_thresholds = (
+            _parse_float_list(args.yolo_iou_thresholds, "--yolo-iou-thresholds")
+            if args.frame_detector == "yolo"
+            else None
+        )
+        yolo_imgsz_values = (
+            _parse_int_list(args.yolo_imgsz_values, "--yolo-imgsz-values")
+            if args.frame_detector == "yolo"
+            else None
+        )
         result = run_parameter_sweep(
             images_root=args.images_root,
             masks_root=args.masks_root,
             output_root=args.output_root,
-            stenosis_thresholds=_parse_float_list(args.stenosis_thresholds, "--stenosis-thresholds"),
-            average_radius_thresholds=_parse_float_list(args.average_radius_thresholds, "--average-radius-thresholds"),
+            frame_detector=args.frame_detector,
+            stenosis_thresholds=(
+                _parse_float_list(args.stenosis_thresholds, "--stenosis-thresholds")
+                if args.frame_detector == "vessel"
+                else None
+            ),
+            average_radius_thresholds=(
+                _parse_float_list(args.average_radius_thresholds, "--average-radius-thresholds")
+                if args.frame_detector == "vessel"
+                else None
+            ),
             radius_outside_fraction_thresholds=_parse_float_list(
                 args.radius_outside_fraction_thresholds,
                 "--radius-outside-fraction-thresholds",
+            )
+            if args.frame_detector == "vessel"
+            else None,
+            radius_min_outside_samples_values=(
+                _parse_int_list(
+                    args.radius_min_outside_samples_values,
+                    "--radius-min-outside-samples-values",
+                )
+                if args.frame_detector == "vessel"
+                else None
             ),
-            radius_min_outside_samples_values=_parse_int_list(
-                args.radius_min_outside_samples_values,
-                "--radius-min-outside-samples-values",
-            ),
+            yolo_weights=args.yolo_weights,
+            yolo_conf_thresholds=yolo_conf_thresholds,
+            yolo_iou_thresholds=yolo_iou_thresholds,
+            yolo_imgsz_values=yolo_imgsz_values,
+            yolo_device=args.device,
             min_supporting_frames_values=_parse_int_list(
                 args.min_supporting_frames_values,
                 "--min-supporting-frames-values",
@@ -156,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             multiview_output_root=args.multiview_output_root,
             multiview_config=MultiViewFusionConfig(view_diversity_mode=args.multiview_view_diversity_mode),
             split_multiview_by_coronary_side=args.multiview_split_by_coronary_side,
+            write_yolo_review_images=args.save_review_images,
         )
     except (FileNotFoundError, NotADirectoryError, TemporalLoadError, ValueError, OSError) as exc:
         print(f"Parameter sweep failed: {exc}", file=sys.stderr)
@@ -222,6 +308,18 @@ def _parse_list(raw_value: str | None, option_name: str, parser) -> list | None:
     if not values:
         raise ValueError(f"{option_name} must contain at least one value.")
     return values
+
+
+def _warn_ignored_options(raw_args: list[str], option_names: set[str], message: str) -> None:
+    used_options = sorted(option for option in option_names if _option_used(raw_args, option))
+    if not used_options:
+        return
+    print(f"Warning: {message}: {', '.join(used_options)}.", file=sys.stderr)
+
+
+def _option_used(raw_args: list[str], option: str) -> bool:
+    option_prefix = f"{option}="
+    return any(argument == option or argument.startswith(option_prefix) for argument in raw_args)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,16 @@ FRAME_PARAMS = (
     "stenosis_threshold",
     "average_radius_threshold",
 )
+YOLO_FRAME_PARAMS = (
+    "yolo_conf",
+    "yolo_iou",
+    "yolo_imgsz",
+)
+ALL_FRAME_PARAMS = (
+    "detector",
+    *FRAME_PARAMS,
+    *YOLO_FRAME_PARAMS,
+)
 TEMPORAL_PARAMS = (
     "min_supporting_frames",
     "min_persistence_ratio",
@@ -68,7 +78,7 @@ ALL_VARIANT_FIELDS = (
     "temporal_variant",
     "result_summary_path",
     "row_count",
-    *FRAME_PARAMS,
+    *ALL_FRAME_PARAMS,
     *TEMPORAL_PARAMS,
     *BINARY_METRICS,
 )
@@ -116,7 +126,7 @@ class VariantMetric:
     temporal_variant: str | None
     result_summary_path: Path
     row_count: int | None
-    frame_params: dict[str, int | float | None]
+    frame_params: dict[str, int | float | str | None]
     temporal_params: dict[str, int | float | None]
     metrics: dict[str, int | float | None]
     rows_csv_path: Path | None = None
@@ -238,6 +248,7 @@ def run_sweep_report(
     stage_progression = _stage_progression_for_selected_variant(variants, best_multiview)
     warnings = build_warnings(multiview_variants, best_multiview)
     warnings.extend(_stage_progression_warnings(stage_progression, best_multiview))
+    score_semantics_note = _score_semantics_note(multiview_variants)
 
     table_paths = {
         "all_variant_metrics": tables_root / "all_variant_metrics.csv",
@@ -271,14 +282,12 @@ def run_sweep_report(
             "Benchmark case rows are missing for the selected best multi-view variant; case review CSV is header-only."
         )
 
-    plot_paths = {
+    plot_paths: dict[str, Path] = {
         "top_multiview_f1": plots_root / "01_top_multiview_f1.png",
         "precision_recall_scatter": plots_root / "02_multiview_precision_recall_scatter.png",
         "confusion_matrix": plots_root / "03_best_multiview_confusion_matrix.png",
         "stage_progression_metrics": plots_root / "04_stage_progression_metrics.png",
         "temporal_parameter_heatmap": plots_root / "05_temporal_parameter_heatmap.png",
-        "frame_threshold_heatmap": plots_root / "06_frame_threshold_heatmap.png",
-        "radius_parameter_heatmap": plots_root / "07_radius_parameter_heatmap.png",
     }
     plot_top_multiview_f1(top_multiview, plot_paths["top_multiview_f1"])
     plot_precision_recall_scatter(
@@ -298,24 +307,40 @@ def run_sweep_report(
         xlabel="Min Persistence Ratio",
         ylabel="Min Supporting Frames",
     )
-    plot_heatmap(
+    _maybe_plot_heatmap(
         multiview_variants,
+        plot_paths,
+        warnings,
+        key="frame_threshold_heatmap",
+        output_path=plots_root / "06_frame_threshold_heatmap.png",
         x_param="average_radius_threshold",
         y_param="stenosis_threshold",
-        output_path=plot_paths["frame_threshold_heatmap"],
         title="Multi-View Max F1 By Stenosis And Radius Thresholds",
         xlabel="Average Radius Threshold",
         ylabel="Stenosis Threshold",
+        skipped_label="vessel frame-threshold heatmap",
     )
-    plot_heatmap(
+    _maybe_plot_heatmap(
         multiview_variants,
+        plot_paths,
+        warnings,
+        key="radius_parameter_heatmap",
+        output_path=plots_root / "07_radius_parameter_heatmap.png",
         x_param="radius_min_outside_samples",
         y_param="radius_outside_fraction_threshold",
-        output_path=plot_paths["radius_parameter_heatmap"],
         title="Multi-View Max F1 By Radius Outside Parameters",
         xlabel="Radius Min Outside Samples",
         ylabel="Radius Outside Fraction Threshold",
+        skipped_label="vessel radius-parameter heatmap",
     )
+    if _has_parameter(multiview_variants, "yolo_conf"):
+        plot_paths["yolo_conf_f1"] = plots_root / "08_yolo_conf_f1.png"
+        plot_yolo_confidence_f1(multiview_variants, plot_paths["yolo_conf_f1"])
+        plot_paths["yolo_conf_precision_recall"] = plots_root / "09_yolo_conf_precision_recall.png"
+        plot_yolo_confidence_precision_recall(multiview_variants, plot_paths["yolo_conf_precision_recall"])
+    if _has_multiple_parameter_values(multiview_variants, "yolo_iou"):
+        plot_paths["yolo_iou_comparison"] = plots_root / "10_yolo_iou_comparison.png"
+        plot_yolo_iou_comparison(multiview_variants, plot_paths["yolo_iou_comparison"])
 
     summary_payload = build_summary_payload(
         sweep_root=resolved_sweep_root,
@@ -348,6 +373,7 @@ def run_sweep_report(
         table_paths=table_paths,
         plot_paths=plot_paths,
         output_root=resolved_output_root,
+        score_semantics_note=score_semantics_note,
     )
     write_html_report(
         report_paths["html"],
@@ -361,6 +387,7 @@ def run_sweep_report(
         table_paths=table_paths,
         plot_paths=plot_paths,
         output_root=resolved_output_root,
+        score_semantics_note=score_semantics_note,
     )
     report_paths["summary_json"].write_text(json.dumps(summary_payload, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -420,17 +447,24 @@ def load_variant_metrics(benchmark_root: str | Path) -> tuple[list[VariantMetric
     return variants, overview
 
 
-def parse_frame_variant(frame_variant: str | None) -> dict[str, int | float | None]:
-    values = {name: None for name in FRAME_PARAMS}
+def parse_frame_variant(frame_variant: str | None) -> dict[str, int | float | str | None]:
+    values: dict[str, int | float | str | None] = {name: None for name in ALL_FRAME_PARAMS}
     if not frame_variant:
         return values
-    parsed = _parse_variant_parts(frame_variant, FRAME_PARAMS)
+    parsed = _parse_variant_parts(frame_variant, ALL_FRAME_PARAMS)
+    detector = parsed.get("detector")
+    if detector is None and any(parsed.get(name) is not None for name in FRAME_PARAMS):
+        detector = "vessel"
     values.update(
         {
+            "detector": detector,
             "radius_outside_fraction_threshold": _as_float(parsed.get("radius_outside_fraction_threshold")),
             "radius_min_outside_samples": _as_int(parsed.get("radius_min_outside_samples")),
             "stenosis_threshold": _as_float(parsed.get("stenosis_threshold")),
             "average_radius_threshold": _as_float(parsed.get("average_radius_threshold")),
+            "yolo_conf": _as_float(parsed.get("yolo_conf")),
+            "yolo_iou": _as_float(parsed.get("yolo_iou")),
+            "yolo_imgsz": _as_int(parsed.get("yolo_imgsz")),
         }
     )
     return values
@@ -564,14 +598,14 @@ def _stage_progression_columns() -> tuple[str, ...]:
 def metric_sensitivity(variants: Iterable[VariantMetric]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     variant_list = list(variants)
-    for parameter in (*FRAME_PARAMS, *TEMPORAL_PARAMS):
+    for parameter in (*ALL_FRAME_PARAMS, *TEMPORAL_PARAMS):
         values = sorted(
             {
                 variant.to_table_row().get(parameter)
                 for variant in variant_list
                 if variant.to_table_row().get(parameter) is not None
             },
-            key=lambda value: float(value),
+            key=_parameter_sort_key,
         )
         for value in values:
             group = [variant for variant in variant_list if variant.to_table_row().get(parameter) == value]
@@ -847,6 +881,97 @@ def plot_heatmap(
     plt.close(fig)
 
 
+def plot_yolo_confidence_f1(variants: list[VariantMetric], output_path: Path) -> None:
+    rows = _parameter_metric_rows(variants, "yolo_conf")
+    if not rows:
+        _plot_empty(output_path, "YOLO Max F1 By Confidence Threshold")
+        return
+    x_values = [row["value"] for row in rows]
+    f1_values = [row["max_f1"] for row in rows]
+    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    ax.plot(x_values, f1_values, marker="o", linewidth=2.0, color="#2a9d8f")
+    ax.set_xlabel("YOLO Confidence Threshold")
+    ax.set_ylabel("Max F1")
+    ax.set_ylim(0, max(1.0, max(f1_values, default=0.0) + 0.08))
+    ax.set_title("Multi-View Max F1 By YOLO Confidence")
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def plot_yolo_confidence_precision_recall(variants: list[VariantMetric], output_path: Path) -> None:
+    rows = _parameter_metric_rows(variants, "yolo_conf")
+    if not rows:
+        _plot_empty(output_path, "YOLO Precision/Recall By Confidence Threshold")
+        return
+    x_values = [row["value"] for row in rows]
+    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    ax.plot(x_values, [row["max_precision"] for row in rows], marker="o", linewidth=2.0, label="Precision", color="#457b9d")
+    ax.plot(x_values, [row["max_recall"] for row in rows], marker="o", linewidth=2.0, label="Recall", color="#e76f51")
+    ax.set_xlabel("YOLO Confidence Threshold")
+    ax.set_ylabel("Metric Value")
+    ax.set_ylim(0, 1.03)
+    ax.set_title("Multi-View Precision/Recall By YOLO Confidence")
+    ax.grid(alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def plot_yolo_iou_comparison(variants: list[VariantMetric], output_path: Path) -> None:
+    rows = _parameter_metric_rows(variants, "yolo_iou")
+    if not rows:
+        _plot_empty(output_path, "YOLO Max F1 By IoU Threshold")
+        return
+    labels = [_format_param_value(row["value"]) for row in rows]
+    f1_values = [row["max_f1"] for row in rows]
+    fig, ax = plt.subplots(figsize=(8.0, 5.0))
+    ax.bar(np.arange(len(labels)), f1_values, color="#6d597a", alpha=0.88)
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels(labels)
+    ax.set_xlabel("YOLO IoU Threshold")
+    ax.set_ylabel("Max F1")
+    ax.set_ylim(0, max(1.0, max(f1_values, default=0.0) + 0.08))
+    ax.set_title("Multi-View Max F1 By YOLO IoU")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def _maybe_plot_heatmap(
+    variants: list[VariantMetric],
+    plot_paths: dict[str, Path],
+    warnings: list[str],
+    *,
+    key: str,
+    output_path: Path,
+    x_param: str,
+    y_param: str,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    skipped_label: str,
+) -> None:
+    if not (_has_parameter(variants, x_param) and _has_parameter(variants, y_param)):
+        warnings.append(
+            f"Skipped {skipped_label}: required parameters {x_param} and {y_param} were not present in the benchmark variants."
+        )
+        return
+    plot_paths[key] = output_path
+    plot_heatmap(
+        variants,
+        x_param=x_param,
+        y_param=y_param,
+        output_path=output_path,
+        title=title,
+        xlabel=xlabel,
+        ylabel=ylabel,
+    )
+
+
 def write_markdown_report(
     path: Path,
     *,
@@ -860,6 +985,7 @@ def write_markdown_report(
     table_paths: dict[str, Path],
     plot_paths: dict[str, Path],
     output_root: Path,
+    score_semantics_note: str,
 ) -> None:
     variant_counts = _variant_counts_by_level(variants)
     lines = [
@@ -868,6 +994,8 @@ def write_markdown_report(
         "## 1. Sweep overview",
         "",
         "This report summarizes binary weak-label agreement for stenosis detection. Severity-related tables and level-of-stenosis statistics are intentionally excluded.",
+        "",
+        score_semantics_note,
         "",
         _markdown_table(
             [{"level": level, "benchmarked_variants": variant_counts.get(level, 0)} for level in LEVELS],
@@ -916,9 +1044,7 @@ def write_markdown_report(
         "",
         _sensitivity_summary(sensitivity_rows),
         "",
-        f"- Temporal heatmap: [{_relative_path(plot_paths['temporal_parameter_heatmap'], output_root)}]({_relative_path(plot_paths['temporal_parameter_heatmap'], output_root)})",
-        f"- Frame threshold heatmap: [{_relative_path(plot_paths['frame_threshold_heatmap'], output_root)}]({_relative_path(plot_paths['frame_threshold_heatmap'], output_root)})",
-        f"- Radius parameter heatmap: [{_relative_path(plot_paths['radius_parameter_heatmap'], output_root)}]({_relative_path(plot_paths['radius_parameter_heatmap'], output_root)})",
+        *_parameter_plot_links_markdown(plot_paths, output_root),
         "",
         "## 7. Files generated",
         "",
@@ -941,6 +1067,7 @@ def write_html_report(
     table_paths: dict[str, Path],
     plot_paths: dict[str, Path],
     output_root: Path,
+    score_semantics_note: str,
 ) -> None:
     variant_counts = _variant_counts_by_level(variants)
     body = "\n".join(
@@ -948,6 +1075,7 @@ def write_html_report(
             "<h1>Final CADICA Sweep Benchmark Report</h1>",
             "<h2>1. Sweep Overview</h2>",
             "<p>This report summarizes binary weak-label agreement for stenosis detection. Severity-related tables and level-of-stenosis statistics are intentionally excluded.</p>",
+            f"<p>{html.escape(score_semantics_note)}</p>",
             _html_table(
                 [{"level": level, "benchmarked_variants": variant_counts.get(level, 0)} for level in LEVELS],
                 ("level", "benchmarked_variants"),
@@ -977,9 +1105,7 @@ def write_html_report(
             "<h2>6. Parameter Sensitivity</h2>",
             f"<p>{html.escape(_sensitivity_summary(sensitivity_rows))}</p>",
             "<ul>",
-            f"<li>{_html_link(plot_paths['temporal_parameter_heatmap'], output_root, 'Temporal heatmap')}</li>",
-            f"<li>{_html_link(plot_paths['frame_threshold_heatmap'], output_root, 'Frame threshold heatmap')}</li>",
-            f"<li>{_html_link(plot_paths['radius_parameter_heatmap'], output_root, 'Radius parameter heatmap')}</li>",
+            *_parameter_plot_links_html(plot_paths, output_root),
             "</ul>",
             "<h2>7. Files Generated</h2>",
             _html_file_list(table_paths, plot_paths, output_root),
@@ -1033,6 +1159,7 @@ def build_summary_payload(
         "top_k": top_k,
         "variant_counts_by_level": _variant_counts_by_level(variants),
         "benchmark_jobs": benchmark_overview,
+        "score_semantics": _score_semantics_note(variants),
         "best_multiview": best_multiview.to_table_row(),
         "best_by_level": [variant.to_table_row() for variant in best_by_level],
         "stage_progression": [
@@ -1265,6 +1392,50 @@ def _max_metric(variants: list[VariantMetric], metric_name: str) -> float | None
     return None if not values else max(values)
 
 
+def _parameter_metric_rows(variants: list[VariantMetric], parameter: str) -> list[dict[str, float]]:
+    values = sorted(
+        {
+            variant.to_table_row().get(parameter)
+            for variant in variants
+            if variant.to_table_row().get(parameter) is not None
+        },
+        key=_parameter_sort_key,
+    )
+    rows: list[dict[str, float]] = []
+    for value in values:
+        group = [variant for variant in variants if variant.to_table_row().get(parameter) == value]
+        numeric_value = _coerce_metric(value)
+        max_f1 = _max_metric(group, "f1")
+        max_precision = _max_metric(group, "precision")
+        max_recall = _max_metric(group, "recall")
+        if numeric_value is None or max_f1 is None:
+            continue
+        rows.append(
+            {
+                "value": float(numeric_value),
+                "max_f1": float(max_f1),
+                "max_precision": 0.0 if max_precision is None else float(max_precision),
+                "max_recall": 0.0 if max_recall is None else float(max_recall),
+            }
+        )
+    return rows
+
+
+def _has_parameter(variants: list[VariantMetric], parameter: str) -> bool:
+    return any(variant.to_table_row().get(parameter) is not None for variant in variants)
+
+
+def _has_multiple_parameter_values(variants: list[VariantMetric], parameter: str) -> bool:
+    return len({variant.to_table_row().get(parameter) for variant in variants if variant.to_table_row().get(parameter) is not None}) > 1
+
+
+def _parameter_sort_key(value: Any) -> tuple[int, float | str]:
+    numeric = _coerce_metric(value)
+    if numeric is not None:
+        return (0, float(numeric))
+    return (1, str(value))
+
+
 def _best_by_level(variants: list[VariantMetric]) -> list[VariantMetric]:
     best: list[VariantMetric] = []
     for level in LEVELS:
@@ -1348,12 +1519,20 @@ def _best_rows_have_split_output(variant: VariantMetric) -> bool:
 
 def _compact_variant_label(variant: VariantMetric) -> str:
     row = variant.to_table_row()
-    parts = [
-        f"rf={_format_param_value(row.get('radius_outside_fraction_threshold'))}",
-        f"rs={_format_param_value(row.get('radius_min_outside_samples'))}",
-        f"st={_format_param_value(row.get('stenosis_threshold'))}",
-        f"ar={_format_param_value(row.get('average_radius_threshold'))}",
-    ]
+    if row.get("detector") == "yolo":
+        parts = [
+            "det=yolo",
+            f"conf={_format_param_value(row.get('yolo_conf'))}",
+            f"iou={_format_param_value(row.get('yolo_iou'))}",
+            f"imgsz={_format_param_value(row.get('yolo_imgsz'))}",
+        ]
+    else:
+        parts = [
+            f"rf={_format_param_value(row.get('radius_outside_fraction_threshold'))}",
+            f"rs={_format_param_value(row.get('radius_min_outside_samples'))}",
+            f"st={_format_param_value(row.get('stenosis_threshold'))}",
+            f"ar={_format_param_value(row.get('average_radius_threshold'))}",
+        ]
     if variant.temporal_variant:
         parts.extend(
             [
@@ -1403,6 +1582,22 @@ def _variant_counts_by_level(variants: list[VariantMetric]) -> dict[str, int]:
     return {level: sum(1 for variant in variants if variant.level == level) for level in LEVELS}
 
 
+def _score_semantics_note(variants: list[VariantMetric]) -> str:
+    detectors = {variant.to_table_row().get("detector") for variant in variants if variant.to_table_row().get("detector")}
+    if detectors == {"yolo"}:
+        return (
+            "Score semantics: this is a YOLO sweep. Columns kept for schema compatibility such as "
+            "`final_degree`, `final_max_degree`, and `max_stenosis_degree` contain confidence-derived scores, "
+            "not anatomical stenosis degree."
+        )
+    if "yolo" in detectors:
+        return (
+            "Score semantics: this report contains mixed detector variants. YOLO rows use confidence-derived scores "
+            "in degree-compatible columns, while vessel rows use radius-derived stenosis degree estimates."
+        )
+    return "Score semantics: vessel detector rows use radius-derived stenosis degree estimates."
+
+
 def _job_summary_sentence(overview: dict[str, Any]) -> str:
     completed = overview.get("completed_jobs")
     skipped = overview.get("skipped_jobs")
@@ -1414,7 +1609,7 @@ def _job_summary_sentence(overview: dict[str, Any]) -> str:
 
 def _best_result_columns() -> tuple[str, ...]:
     return (
-        *FRAME_PARAMS,
+        *ALL_FRAME_PARAMS,
         *TEMPORAL_PARAMS,
         "Recall",
         "Specificity",
@@ -1427,7 +1622,7 @@ def _best_result_columns() -> tuple[str, ...]:
 def _best_result_row(variant: VariantMetric) -> dict[str, Any]:
     row = variant.to_table_row()
     return {
-        **{column: row.get(column) for column in (*FRAME_PARAMS, *TEMPORAL_PARAMS)},
+        **{column: row.get(column) for column in (*ALL_FRAME_PARAMS, *TEMPORAL_PARAMS)},
         "Recall": _format_percentage(variant.metric("recall")),
         "Specificity": _format_percentage(variant.metric("specificity")),
         "Precision": _format_percentage(variant.metric("precision")),
@@ -1509,6 +1704,36 @@ def _html_file_list(table_paths: dict[str, Path], plot_paths: dict[str, Path], o
     return "<ul>" + "".join(items) + "</ul>"
 
 
+PARAMETER_PLOT_LABELS = {
+    "temporal_parameter_heatmap": "Temporal heatmap",
+    "frame_threshold_heatmap": "Frame threshold heatmap",
+    "radius_parameter_heatmap": "Radius parameter heatmap",
+    "yolo_conf_f1": "YOLO F1 vs confidence",
+    "yolo_conf_precision_recall": "YOLO precision/recall vs confidence",
+    "yolo_iou_comparison": "YOLO IoU comparison",
+}
+
+
+def _parameter_plot_links_markdown(plot_paths: dict[str, Path], output_root: Path) -> list[str]:
+    links = []
+    for key, label in PARAMETER_PLOT_LABELS.items():
+        path = plot_paths.get(key)
+        if path is None:
+            continue
+        relative = _relative_path(path, output_root)
+        links.append(f"- {label}: [{relative}]({relative})")
+    return links or ["- No parameter plots were generated."]
+
+
+def _parameter_plot_links_html(plot_paths: dict[str, Path], output_root: Path) -> list[str]:
+    links = []
+    for key, label in PARAMETER_PLOT_LABELS.items():
+        path = plot_paths.get(key)
+        if path is not None:
+            links.append(f"<li>{_html_link(path, output_root, label)}</li>")
+    return links or ["<li>No parameter plots were generated.</li>"]
+
+
 def _generated_files_markdown(table_paths: dict[str, Path], plot_paths: dict[str, Path], output_root: Path) -> list[str]:
     return [
         f"- [{_relative_path(path, output_root)}]({_relative_path(path, output_root)})"
@@ -1527,7 +1752,7 @@ def _sensitivity_summary(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "No parameter sensitivity rows were available."
     fragments: list[str] = []
-    for parameter in (*FRAME_PARAMS, *TEMPORAL_PARAMS):
+    for parameter in (*ALL_FRAME_PARAMS, *TEMPORAL_PARAMS):
         parameter_rows = [row for row in rows if row.get("parameter") == parameter and row.get("max_f1") is not None]
         if not parameter_rows:
             continue

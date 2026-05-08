@@ -69,7 +69,12 @@ Prepared images are written as:
 work/cadica_prepared/keyframes/p1/v1/slice_00012.png
 ```
 
-## 2. Run Segmentation
+CADICA can then follow either pipeline route:
+
+- Route A: keyframes -> vessel segmentation -> radius stenosis detection -> temporal fusion -> multiview fusion.
+- Route B: keyframes -> YOLO stenosis detection -> temporal fusion -> multiview fusion.
+
+## 2. Run Segmentation For Route A
 
 ```bash
 python scripts/run_segmentation.py \
@@ -77,10 +82,14 @@ python scripts/run_segmentation.py \
   --stenosis-masks-root work/cadica_vessel_masks
 ```
 
-## 3. Run Frame Stenosis Detection
+Vessel masks are required only for the vessel/radius detector. YOLO can skip
+this step unless you want optional skeleton points in YOLO frame JSONs.
+
+## 3A. Run Vessel/Radius Frame Stenosis Detection
 
 ```bash
 python scripts/run_stenosis_detection.py \
+  --detector vessel \
   --images-root work/cadica_prepared/keyframes \
   --masks-root work/cadica_vessel_masks \
   --output-root work/cadica_frame_results \
@@ -94,8 +103,47 @@ Frame outputs are expected under:
 work/cadica_frame_results/p1/v1/slice_00012_stenosis_results.json
 ```
 
-To run a full CADICA parameter sweep after keyframe extraction and vessel
-segmentation, use:
+## 3B. Run YOLO Frame Stenosis Detection
+
+Train YOLO from an Ultralytics-compatible dataset YAML:
+
+```bash
+python scripts/run_yolo_train.py \
+  --data data/yolo_stenosis/data.yaml \
+  --model yolov8x.pt \
+  --imgsz 1024 \
+  --epochs 100 \
+  --project runs/stenosis \
+  --name yolo_stenosis
+```
+
+Run YOLO frame inference on prepared CADICA keyframes:
+
+```bash
+python scripts/run_stenosis_detection.py \
+  --detector yolo \
+  --images-root work/cadica_prepared/keyframes \
+  --yolo-weights runs/stenosis/yolo_stenosis/weights/best.pt \
+  --output-root work/yolo_frame_results \
+  --yolo-imgsz 1024 \
+  --yolo-conf 0.25 \
+  --yolo-iou 0.7 \
+  --device 0 \
+  --no-debug-images
+```
+
+YOLO frame outputs are expected under:
+
+```text
+work/yolo_frame_results/p1/v1/slice_00012_stenosis_results.json
+```
+
+YOLO `degree` and severity-compatible fields are confidence-derived scores.
+They are retained for temporal fusion, multi-view fusion, and benchmark schema
+compatibility, not as anatomical stenosis degree.
+
+To run a full CADICA vessel/radius parameter sweep after keyframe extraction
+and vessel segmentation, use:
 
 ```bash
 python scripts/run_stenosis_temporal_sweep.py \
@@ -122,6 +170,26 @@ The multi-view step does not add another hyperparameter grid. It runs once for
 each frame/temporal variant combination and writes outputs under
 `work/cadica_sweep/multiview_results/<frame_variant>/<temporal_variant>/`.
 
+For a YOLO CADICA sweep:
+
+```bash
+python scripts/run_stenosis_temporal_sweep.py \
+  --frame-detector yolo \
+  --images-root work/cadica_prepared/keyframes \
+  --yolo-weights runs/stenosis/yolo_stenosis/weights/best.pt \
+  --output-root work/yolo_sweep \
+  --yolo-conf-thresholds 0.15,0.25,0.35,0.45 \
+  --yolo-iou-thresholds 0.50,0.70 \
+  --yolo-imgsz-values 1024 \
+  --min-supporting-frames-values 1,2,3 \
+  --min-persistence-ratios 0.25,0.50 \
+  --allow-variable-frame-count \
+  --run-multiview \
+  --multiview-case-root-tree work/cadica_prepared/keyframes \
+  --multiview-view-diversity-mode projection_group \
+  --multiview-split-by-coronary-side
+```
+
 ## 4. Run Temporal Fusion
 
 CADICA videos can have variable frame counts, so use variable-count mode.
@@ -138,6 +206,18 @@ python scripts/run_temporal_fusion.py \
 
 Temporal outputs are optional for the supervised CADICA benchmark when
 `--video-prediction-source frame_any` is used.
+
+For YOLO frame outputs:
+
+```bash
+python scripts/run_temporal_fusion.py \
+  --results-root work/yolo_frame_results \
+  --output-root work/yolo_temporal_results \
+  --allow-variable-frame-count \
+  --min-supporting-frames 2 \
+  --min-persistence-ratio 0.25 \
+  --workers 8
+```
 
 ## 5. Run Multi-View Fusion
 
@@ -160,6 +240,17 @@ so LCA/LCA2 and RCA views cannot support each other. Views with missing or
 unknown projection metadata are reported in the combined JSON but are not used
 for side-specific fusion by default.
 
+For YOLO temporal outputs:
+
+```bash
+python scripts/run_multiview_fusion.py \
+  --case-root-tree work/cadica_prepared/keyframes \
+  --temporal-results-root work/yolo_temporal_results \
+  --output-root work/yolo_multiview_results \
+  --view-diversity-mode projection_group \
+  --split-by-coronary-side
+```
+
 ## 6. Run CADICA Benchmark
 
 ```bash
@@ -171,6 +262,18 @@ python scripts/run_cadica_benchmark.py \
   --output-root work/cadica_benchmark \
   --frame-min-degree 0.0 \
   --box-margin-px 5 \
+  --video-prediction-source frame_any
+```
+
+YOLO CADICA benchmark:
+
+```bash
+python scripts/run_cadica_benchmark.py \
+  --manifest work/cadica_prepared/manifest.csv \
+  --frame-results-root work/yolo_frame_results \
+  --temporal-results-root work/yolo_temporal_results \
+  --multiview-results-root work/yolo_multiview_results \
+  --output-root work/yolo_cadica_benchmark \
   --video-prediction-source frame_any
 ```
 
@@ -300,6 +403,17 @@ python scripts/run_cadica_benchmark_sweep.py \
   --workers 8
 ```
 
+YOLO threshold sweep:
+
+```bash
+python scripts/run_cadica_benchmark_sweep.py \
+  --manifest work/cadica_prepared/manifest.csv \
+  --frame-results-root work/yolo_frame_results \
+  --temporal-results-root work/yolo_temporal_results \
+  --multiview-results-root work/yolo_multiview_results \
+  --output-root work/yolo_cadica_threshold_sweep
+```
+
 You can also ask the normal CADICA benchmark command to write the threshold
 sweep beside its usual row-level outputs:
 
@@ -320,7 +434,8 @@ Outputs:
 - `cadica_threshold_sweep_summary.json`
 
 `frame_min_degree` controls whether predicted stenosis points count as
-positive. `box_margin_px` controls the tolerance around CADICA GT boxes for
+positive. For YOLO outputs this is a threshold over the confidence-derived score
+stored in the compatibility `degree` field. `box_margin_px` controls the tolerance around CADICA GT boxes for
 point-in-box localization. `multiview_min_score` controls the minimum
 multi-view confidence/score required for a saved multi-view result to count as
 positive. `--workers` parallelizes evaluation of sweep combinations across
