@@ -1135,14 +1135,49 @@ def _index_frame_predictions(frame_results_root: Path) -> dict[tuple[str, str, s
             continue
         prediction = _load_frame_prediction(result_path)
         patient_video_pairs = _candidate_patient_video_pairs(result_path, frame_results_root, prediction.view_id)
-        image_keys = {prediction.image_name, prediction.image_stem, Path(prediction.image_name).stem}
         for patient_id, video_id in patient_video_pairs:
+            image_keys = _frame_prediction_image_keys(prediction, patient_id=patient_id, video_id=video_id)
             for image_key in image_keys:
                 if image_key:
                     predictions.setdefault((patient_id, video_id, image_key), prediction)
     if not predictions:
         raise FileNotFoundError(f"No frame-level '*{FRAME_RESULT_SUFFIX}' files were found under: {frame_results_root}")
     return predictions
+
+
+def _frame_prediction_image_keys(
+    prediction: FramePrediction,
+    *,
+    patient_id: str,
+    video_id: str,
+) -> set[str]:
+    image_stem = prediction.image_stem or Path(prediction.image_name).stem
+    image_keys = {prediction.image_name, image_stem, Path(prediction.image_name).stem}
+    image_keys.update(_cadica_slice_alias_keys(image_stem, prediction.image_name, patient_id=patient_id, video_id=video_id))
+    return image_keys
+
+
+def _cadica_slice_alias_keys(
+    image_stem: str,
+    image_name: str,
+    *,
+    patient_id: str,
+    video_id: str,
+) -> set[str]:
+    pattern = re.compile(
+        rf"^{re.escape(patient_id)}_{re.escape(video_id)}_(\d+)$",
+        re.IGNORECASE,
+    )
+    match = pattern.fullmatch(image_stem)
+    if match is None:
+        return set()
+
+    slice_stem = f"slice_{match.group(1)}"
+    aliases = {slice_stem, f"{slice_stem}.png"}
+    suffix = Path(image_name).suffix
+    if suffix:
+        aliases.add(f"{slice_stem}{suffix}")
+    return aliases
 
 
 def write_cadica_review_images(

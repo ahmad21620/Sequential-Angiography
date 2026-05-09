@@ -231,6 +231,60 @@ class CadicaBenchmarkTests(unittest.TestCase):
             self.assertIn("p1", multiview_predictions)
             self.assertNotIn(frame_variant, multiview_predictions)
 
+    def test_cadica_original_frame_name_matches_slice_manifest_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            output_root = temp_root / "benchmark"
+            frame_variant = (
+                "radius_outside_fraction_threshold_0p1"
+                "__radius_min_outside_samples_2"
+                "__stenosis_threshold_0p35"
+                "__average_radius_threshold_3"
+            )
+
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        37,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 20, "h": 20, "category": "stenosis", "source_path": "gt/37.txt"}],
+                    )
+                ],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant / "p1" / "v1" / "p1_v1_00037_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=37,
+                image_name="p1_v1_00037.png",
+                points=[{"x": 15, "y": 15, "degree": 0.70, "severity": "moderate"}],
+            )
+
+            frame_predictions = _index_frame_predictions(frame_results_root)
+            self.assertIn(("p1", "v1", "p1_v1_00037"), frame_predictions)
+            self.assertIn(("p1", "v1", "p1_v1_00037.png"), frame_predictions)
+            self.assertIn(("p1", "v1", "slice_00037"), frame_predictions)
+            self.assertIn(("p1", "v1", "slice_00037.png"), frame_predictions)
+
+            result = run_cadica_benchmark(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                output_root=output_root,
+                frame_min_degree=0.5,
+                box_margin_px=0.0,
+            )
+
+            frame_row = result.frame_rows[0]
+            self.assertTrue(frame_row["predicted_positive"])
+            self.assertEqual(frame_row["predicted_point_count"], 1)
+            self.assertEqual(result.summary["frame_binary_metrics"]["TP"], 1)
+
     def test_review_images_are_written_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -373,12 +427,13 @@ class CadicaBenchmarkTests(unittest.TestCase):
         video_id: str,
         frame_id: int,
         points: list[dict[str, object]],
+        image_name: str | None = None,
     ) -> None:
-        image_name = f"slice_{frame_id:05d}.png"
-        image_stem = image_name.removesuffix(".png")
+        resolved_image_name = image_name or f"slice_{frame_id:05d}.png"
+        image_stem = Path(resolved_image_name).stem
         payload = {
             "frame": {
-                "image_name": image_name,
+                "image_name": resolved_image_name,
                 "image_stem": image_stem,
                 "frame_index": frame_id,
                 "view_id": f"{patient_id}/{video_id}",
