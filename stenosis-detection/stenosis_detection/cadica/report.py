@@ -23,6 +23,14 @@ SWEEP_SUMMARY_JSON = "cadica_threshold_sweep_summary.json"
 CADICA_SUMMARY_JSON = "cadica_summary.json"
 MULTIVIEW_PATIENT_ROWS_CSV = "cadica_multiview_patient_rows.csv"
 MULTIVIEW_SIDE_ROWS_CSV = "cadica_multiview_side_rows.csv"
+EXPERIMENT_LONG_CSV = "cadica_experiment_metrics_long.csv"
+EXPERIMENT_WIDE_CSV = "cadica_experiment_metrics_wide.csv"
+BEST_BY_STAGE_CSV = "best_experiments_by_stage.csv"
+BEST_OVERALL_CSV = "best_overall_experiments.csv"
+TEMPORAL_EFFECTS_CSV = "temporal_parameter_effects.csv"
+FRAME_EFFECTS_CSV = "frame_parameter_effects.csv"
+STAGE_PROGRESSION_CSV = "stage_progression.csv"
+DIAGNOSTICS_JSON = "cadica_benchmark_diagnostics.json"
 
 CONFIG_COLUMNS = (
     "frame_min_degree",
@@ -118,6 +126,15 @@ def run_cadica_report(
     plots_root = resolved_output_root / "plots"
     tables_root.mkdir(parents=True, exist_ok=True)
     plots_root.mkdir(parents=True, exist_ok=True)
+
+    if (resolved_benchmark_root / EXPERIMENT_LONG_CSV).is_file() and (resolved_benchmark_root / EXPERIMENT_WIDE_CSV).is_file():
+        return _run_variant_aware_report(
+            benchmark_root=resolved_benchmark_root,
+            output_root=resolved_output_root,
+            tables_root=tables_root,
+            plots_root=plots_root,
+            top_k=top_k,
+        )
 
     sweep_csv = resolved_benchmark_root / SWEEP_CSV
     sweep_summary_path = resolved_benchmark_root / SWEEP_SUMMARY_JSON
@@ -299,6 +316,589 @@ def plot_precision_recall(
     fig.tight_layout()
     fig.savefig(output_path, dpi=220)
     plt.close(fig)
+
+
+def _run_variant_aware_report(
+    *,
+    benchmark_root: Path,
+    output_root: Path,
+    tables_root: Path,
+    plots_root: Path,
+    top_k: int,
+) -> CadicaReportArtifacts:
+    long_rows = _read_csv(benchmark_root / EXPERIMENT_LONG_CSV)
+    wide_rows = _read_csv(benchmark_root / EXPERIMENT_WIDE_CSV)
+    if not long_rows or not wide_rows:
+        raise CadicaReportError("Variant-aware CADICA experiment metric CSVs are empty.")
+
+    diagnostics = _read_json(benchmark_root / DIAGNOSTICS_JSON) if (benchmark_root / DIAGNOSTICS_JSON).is_file() else {}
+    best_by_stage_rows = _read_optional_csv(benchmark_root / BEST_BY_STAGE_CSV)
+    best_overall_rows = _read_optional_csv(benchmark_root / BEST_OVERALL_CSV)
+    temporal_effect_rows = _read_optional_csv(benchmark_root / TEMPORAL_EFFECTS_CSV)
+    frame_effect_rows = _read_optional_csv(benchmark_root / FRAME_EFFECTS_CSV)
+    progression_rows = _read_optional_csv(benchmark_root / STAGE_PROGRESSION_CSV)
+
+    table_sources = {
+        "experiment_metrics_long": benchmark_root / EXPERIMENT_LONG_CSV,
+        "experiment_metrics_wide": benchmark_root / EXPERIMENT_WIDE_CSV,
+        "best_experiments_by_stage": benchmark_root / BEST_BY_STAGE_CSV,
+        "best_overall_experiments": benchmark_root / BEST_OVERALL_CSV,
+        "temporal_parameter_effects": benchmark_root / TEMPORAL_EFFECTS_CSV,
+        "frame_parameter_effects": benchmark_root / FRAME_EFFECTS_CSV,
+        "stage_progression": benchmark_root / STAGE_PROGRESSION_CSV,
+    }
+    table_paths: dict[str, Path] = {}
+    for name, source_path in table_sources.items():
+        if source_path.is_file():
+            rows = _read_csv(source_path)
+            output_path = tables_root / source_path.name
+            _write_csv(output_path, rows, fieldnames=list(rows[0]) if rows else [])
+            table_paths[name] = output_path
+
+    best_overall = best_overall_rows[0] if best_overall_rows else _best_wide_row(wide_rows)
+    best_stage_rank_ones = [row for row in best_by_stage_rows if str(row.get("rank")) == "1"]
+    if not best_stage_rank_ones:
+        best_stage_rank_ones = _best_stage_rows_from_long(long_rows)
+
+    overview = _variant_overview(
+        diagnostics=diagnostics,
+        long_rows=long_rows,
+        wide_rows=wide_rows,
+    )
+    recommendations = _variant_recommendations(
+        long_rows=long_rows,
+        wide_rows=wide_rows,
+        progression_rows=progression_rows,
+    )
+    warnings = _variant_report_warnings(diagnostics)
+
+    summary_payload = {
+        "title": "CADICA Variant-Aware Benchmark Report",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "overview": overview,
+        "best_overall_configuration": best_overall,
+        "best_by_stage": best_stage_rank_ones,
+        "recommendations": recommendations,
+        "warnings": warnings,
+        "tables": {name: str(path) for name, path in table_paths.items()},
+        "plots": {},
+        "source_diagnostics": diagnostics,
+    }
+
+    reports = {
+        "markdown": output_root / "report.md",
+        "html": output_root / "report.html",
+        "summary_json": output_root / "summary.json",
+    }
+    _write_variant_markdown_report(
+        reports["markdown"],
+        summary=summary_payload,
+        best_overall=best_overall,
+        best_by_stage=best_stage_rank_ones,
+        temporal_effects=temporal_effect_rows,
+        frame_effects=frame_effect_rows,
+        progression_rows=progression_rows,
+        recommendations=recommendations,
+        table_paths=table_paths,
+        output_root=output_root,
+    )
+    _write_variant_html_report(
+        reports["html"],
+        summary=summary_payload,
+        best_overall=best_overall,
+        best_by_stage=best_stage_rank_ones,
+        temporal_effects=temporal_effect_rows,
+        frame_effects=frame_effect_rows,
+        progression_rows=progression_rows,
+        recommendations=recommendations,
+        table_paths=table_paths,
+        output_root=output_root,
+    )
+    _write_json(reports["summary_json"], summary_payload)
+
+    return CadicaReportArtifacts(
+        output_root=output_root,
+        tables=table_paths,
+        plots={},
+        reports=reports,
+        warnings=warnings,
+    )
+
+
+def _write_variant_markdown_report(
+    path: Path,
+    *,
+    summary: dict[str, Any],
+    best_overall: dict[str, Any],
+    best_by_stage: list[dict[str, Any]],
+    temporal_effects: list[dict[str, str]],
+    frame_effects: list[dict[str, str]],
+    progression_rows: list[dict[str, str]],
+    recommendations: list[str],
+    table_paths: dict[str, Path],
+    output_root: Path,
+) -> None:
+    min_support_rows = _sorted_effect_rows(temporal_effects, "min_supporting_frames")
+    min_persistence_rows = _sorted_effect_rows(temporal_effects, "min_persistence_ratio")
+    lines = [
+        "# CADICA Variant-Aware Benchmark Report",
+        "",
+        "This report analyzes saved CADICA experiment folders without rerunning the raw vessel sweep. Frame, temporal, and multiview variants are preserved as experiment identity columns.",
+        "",
+        "## 1. Overview",
+        "",
+        _markdown_table([summary["overview"]], ("frame_variants", "temporal_variants", "valid_full_experiment_combinations", "benchmark_rows", "matched_frames_only")),
+        "",
+        "## 2. Best Overall Configuration",
+        "",
+        _markdown_table([_best_config_display(best_overall)], _best_config_columns()),
+        "",
+        "## 3. Best Results by Stage",
+        "",
+        _markdown_table(_stage_display_rows(best_by_stage), _stage_display_columns()),
+        "",
+        "## 4. Stage Progression",
+        "",
+        _markdown_table(_progression_summary_rows(progression_rows), ("metric", "mean_frame_to_temporal_delta", "mean_temporal_to_multiview_delta", "mean_frame_to_multiview_delta")),
+        "",
+        "## 5. Effect of min_supporting_frames",
+        "",
+        _markdown_table(_effect_display_rows(min_support_rows, "min_supporting_frames"), _effect_display_columns("min_supporting_frames")),
+        "",
+        _effect_interpretation(min_support_rows, parameter="min_supporting_frames"),
+        "",
+        "## 6. Effect of min_persistence_ratio",
+        "",
+        _markdown_table(_effect_display_rows(min_persistence_rows, "min_persistence_ratio"), _effect_display_columns("min_persistence_ratio")),
+        "",
+        _effect_interpretation(min_persistence_rows, parameter="min_persistence_ratio"),
+        "",
+        "## 7. Effect of Frame-Level Parameters",
+        "",
+        _markdown_table(_frame_effect_display_rows(frame_effects[:10]), _frame_effect_columns()),
+        "",
+        "## 8. Threshold Sensitivity",
+        "",
+        "Threshold sweeps are retained inside each frame/temporal/multiview experiment identity. Use the long and wide CSVs to compare threshold changes without losing the originating sweep folders.",
+        "",
+        "## 9. Recommendations",
+        "",
+        *[f"- {item}" for item in recommendations],
+        "",
+        "## Files Generated",
+        "",
+        *_generated_variant_files_markdown(table_paths, output_root),
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_variant_html_report(
+    path: Path,
+    *,
+    summary: dict[str, Any],
+    best_overall: dict[str, Any],
+    best_by_stage: list[dict[str, Any]],
+    temporal_effects: list[dict[str, str]],
+    frame_effects: list[dict[str, str]],
+    progression_rows: list[dict[str, str]],
+    recommendations: list[str],
+    table_paths: dict[str, Path],
+    output_root: Path,
+) -> None:
+    min_support_rows = _sorted_effect_rows(temporal_effects, "min_supporting_frames")
+    min_persistence_rows = _sorted_effect_rows(temporal_effects, "min_persistence_ratio")
+    body = "\n".join(
+        [
+            "<h1>CADICA Variant-Aware Benchmark Report</h1>",
+            "<p>This report analyzes saved CADICA experiment folders without rerunning the raw vessel sweep. Frame, temporal, and multiview variants are preserved as experiment identity columns.</p>",
+            "<h2>1. Overview</h2>",
+            _html_table([summary["overview"]], ("frame_variants", "temporal_variants", "valid_full_experiment_combinations", "benchmark_rows", "matched_frames_only")),
+            "<h2>2. Best Overall Configuration</h2>",
+            _html_table([_best_config_display(best_overall)], _best_config_columns()),
+            "<h2>3. Best Results by Stage</h2>",
+            _html_table(_stage_display_rows(best_by_stage), _stage_display_columns()),
+            "<h2>4. Stage Progression</h2>",
+            _html_table(_progression_summary_rows(progression_rows), ("metric", "mean_frame_to_temporal_delta", "mean_temporal_to_multiview_delta", "mean_frame_to_multiview_delta")),
+            "<h2>5. Effect of min_supporting_frames</h2>",
+            _html_table(_effect_display_rows(min_support_rows, "min_supporting_frames"), _effect_display_columns("min_supporting_frames")),
+            f"<p>{html.escape(_effect_interpretation(min_support_rows, parameter='min_supporting_frames'))}</p>",
+            "<h2>6. Effect of min_persistence_ratio</h2>",
+            _html_table(_effect_display_rows(min_persistence_rows, "min_persistence_ratio"), _effect_display_columns("min_persistence_ratio")),
+            f"<p>{html.escape(_effect_interpretation(min_persistence_rows, parameter='min_persistence_ratio'))}</p>",
+            "<h2>7. Effect of Frame-Level Parameters</h2>",
+            _html_table(_frame_effect_display_rows(frame_effects[:10]), _frame_effect_columns()),
+            "<h2>8. Threshold Sensitivity</h2>",
+            "<p>Threshold sweeps are retained inside each frame/temporal/multiview experiment identity. Use the long and wide CSVs to compare threshold changes without losing the originating sweep folders.</p>",
+            "<h2>9. Recommendations</h2>",
+            "<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in recommendations) + "</ul>",
+            "<h2>Files Generated</h2>",
+            _html_variant_file_list(table_paths, output_root),
+        ]
+    )
+    document = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CADICA Variant-Aware Benchmark Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; line-height: 1.45; margin: 32px auto; max-width: 1180px; color: #222; }}
+    h1, h2 {{ color: #1f2933; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 14px; }}
+    th, td {{ border: 1px solid #d8dee4; padding: 7px 9px; text-align: left; }}
+    th {{ background: #f2f5f7; }}
+    code {{ background: #f2f5f7; padding: 1px 4px; }}
+  </style>
+</head>
+<body>
+{body}
+</body>
+</html>
+"""
+    path.write_text(document, encoding="utf-8")
+
+
+def _variant_overview(
+    *,
+    diagnostics: dict[str, Any],
+    long_rows: list[dict[str, str]],
+    wide_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    variant_counts = diagnostics.get("variant_counts") if isinstance(diagnostics.get("variant_counts"), dict) else {}
+    manifest_matching = diagnostics.get("manifest_matching") if isinstance(diagnostics.get("manifest_matching"), dict) else {}
+    return {
+        "frame_variants": variant_counts.get("frame_variants_found", _unique_count(wide_rows, "frame_variant")),
+        "temporal_variants": variant_counts.get("temporal_variants_found", _unique_count(wide_rows, "temporal_variant")),
+        "valid_full_experiment_combinations": variant_counts.get("valid_full_experiment_combinations", _unique_count(wide_rows, "frame_variant")),
+        "benchmark_rows": len(long_rows),
+        "wide_rows": len(wide_rows),
+        "matched_frames_only": manifest_matching.get("evaluate_matched_frames_only", ""),
+    }
+
+
+def _variant_report_warnings(diagnostics: dict[str, Any]) -> list[str]:
+    warnings_payload = diagnostics.get("warnings") if isinstance(diagnostics.get("warnings"), dict) else {}
+    items = warnings_payload.get("items") if isinstance(warnings_payload.get("items"), list) else []
+    return [str(item) for item in items]
+
+
+def _best_wide_row(wide_rows: list[dict[str, str]]) -> dict[str, str]:
+    return sorted(wide_rows, key=lambda row: _variant_wide_ranking_key(row, "multiview_side"))[0]
+
+
+def _best_stage_rows_from_long(long_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for stage in ("frame", "temporal_frame_any", "temporal_final", "patient", "multiview_patient", "multiview_side"):
+        candidates = [row for row in long_rows if row.get("stage") == stage and _metric_value(row.get("f1")) is not None]
+        if not candidates:
+            continue
+        rows.append({"rank": "1", **sorted(candidates, key=_variant_long_ranking_key)[0]})
+    return rows
+
+
+def _variant_recommendations(
+    *,
+    long_rows: list[dict[str, str]],
+    wide_rows: list[dict[str, str]],
+    progression_rows: list[dict[str, str]],
+) -> list[str]:
+    side_rows = [row for row in long_rows if row.get("stage") == "multiview_side"]
+    primary_rows = side_rows or [row for row in long_rows if row.get("stage") == "multiview_patient"] or long_rows
+    best_recall = max(primary_rows, key=lambda row: _metric_value(row.get("recall")) or float("-inf"))
+    best_balanced = max(primary_rows, key=lambda row: _metric_value(row.get("balanced_accuracy")) or float("-inf"))
+    best_specificity = max(primary_rows, key=lambda row: _metric_value(row.get("specificity")) or float("-inf"))
+    best_multiview = sorted(wide_rows, key=lambda row: _variant_wide_ranking_key(row, "multiview_side"))[0]
+    temporal_delta = _mean_metric_from_rows(progression_rows, "delta_frame_to_temporal_f1")
+    multiview_delta = _mean_metric_from_rows(progression_rows, "delta_temporal_to_multiview_f1")
+    tradeoff = _recall_specificity_tradeoff_summary(progression_rows)
+    best_stage = _best_stage_improvement_summary(temporal_delta, multiview_delta)
+    return [
+        f"Best high-recall setting: {_short_config(best_recall)} with recall {_format_decimal(best_recall.get('recall'))}.",
+        f"Best balanced setting: {_short_config(best_balanced)} with balanced accuracy {_format_decimal(best_balanced.get('balanced_accuracy'))}.",
+        f"Best specificity setting: {_short_config(best_specificity)} with specificity {_format_decimal(best_specificity.get('specificity'))}.",
+        f"Best multi-view setting: {_short_config(best_multiview)} with side F1 {_format_decimal(best_multiview.get('multiview_side_f1'))}.",
+        tradeoff,
+        f"Temporal vs frame mean F1 delta: {_format_delta(temporal_delta)}.",
+        f"Multi-view vs temporal mean F1 delta: {_format_delta(multiview_delta)}.",
+        best_stage,
+    ]
+
+
+def _best_config_display(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "frame_variant": row.get("frame_variant"),
+        "temporal_variant": row.get("temporal_variant"),
+        "radius_outside_fraction_threshold": row.get("radius_outside_fraction_threshold"),
+        "radius_min_outside_samples": row.get("radius_min_outside_samples"),
+        "stenosis_threshold": row.get("stenosis_threshold"),
+        "average_radius_threshold": row.get("average_radius_threshold"),
+        "min_supporting_frames": row.get("min_supporting_frames"),
+        "min_persistence_ratio": row.get("min_persistence_ratio"),
+        "frame_min_degree": row.get("frame_min_degree"),
+        "box_margin_px": row.get("box_margin_px"),
+        "multiview_min_score": row.get("multiview_min_score"),
+        "multiview_side_f1": _format_decimal(row.get("multiview_side_f1")),
+        "multiview_side_balanced_accuracy": _format_decimal(row.get("multiview_side_balanced_accuracy")),
+    }
+
+
+def _best_config_columns() -> tuple[str, ...]:
+    return (
+        "frame_variant",
+        "temporal_variant",
+        "radius_outside_fraction_threshold",
+        "radius_min_outside_samples",
+        "stenosis_threshold",
+        "average_radius_threshold",
+        "min_supporting_frames",
+        "min_persistence_ratio",
+        "frame_min_degree",
+        "box_margin_px",
+        "multiview_min_score",
+        "multiview_side_f1",
+        "multiview_side_balanced_accuracy",
+    )
+
+
+def _stage_display_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    display_rows: list[dict[str, Any]] = []
+    for row in rows:
+        display_rows.append(
+            {
+                "stage": row.get("stage"),
+                "frame_variant": row.get("frame_variant"),
+                "temporal_variant": row.get("temporal_variant"),
+                "precision": _format_decimal(row.get("precision")),
+                "recall": _format_decimal(row.get("recall")),
+                "specificity": _format_decimal(row.get("specificity")),
+                "f1": _format_decimal(row.get("f1")),
+                "balanced_accuracy": _format_decimal(row.get("balanced_accuracy")),
+                "TP": row.get("TP"),
+                "FP": row.get("FP"),
+                "TN": row.get("TN"),
+                "FN": row.get("FN"),
+            }
+        )
+    return display_rows
+
+
+def _stage_display_columns() -> tuple[str, ...]:
+    return ("stage", "frame_variant", "temporal_variant", "precision", "recall", "specificity", "f1", "balanced_accuracy", "TP", "FP", "TN", "FN")
+
+
+def _progression_summary_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "metric": metric,
+            "mean_frame_to_temporal_delta": _format_delta(_mean_metric_from_rows(rows, f"delta_frame_to_temporal_{metric}")),
+            "mean_temporal_to_multiview_delta": _format_delta(_mean_metric_from_rows(rows, f"delta_temporal_to_multiview_{metric}")),
+            "mean_frame_to_multiview_delta": _format_delta(_mean_metric_from_rows(rows, f"delta_frame_to_multiview_{metric}")),
+        }
+        for metric in ("f1", "precision", "recall", "specificity", "balanced_accuracy")
+    ]
+
+
+def _sorted_effect_rows(rows: list[dict[str, str]], parameter: str) -> list[dict[str, str]]:
+    if any(row.get("group_by") for row in rows):
+        rows = [row for row in rows if row.get("group_by") == parameter]
+    return sorted(
+        [row for row in rows if row.get(parameter) not in (None, "")],
+        key=lambda row: _metric_value(row.get(parameter)) if _metric_value(row.get(parameter)) is not None else float("inf"),
+    )
+
+
+def _effect_display_rows(rows: list[dict[str, str]], parameter: str) -> list[dict[str, Any]]:
+    display_rows: list[dict[str, Any]] = []
+    for row in rows:
+        display_rows.append(
+            {
+                parameter: row.get(parameter),
+                "count_experiments": row.get("count_experiments"),
+                "mean_precision": _format_decimal(row.get("mean_precision")),
+                "mean_recall": _format_decimal(row.get("mean_recall")),
+                "mean_specificity": _format_decimal(row.get("mean_specificity")),
+                "mean_f1": _format_decimal(row.get("mean_f1")),
+                "mean_balanced_accuracy": _format_decimal(row.get("mean_balanced_accuracy")),
+                "max_f1": _format_decimal(row.get("max_f1")),
+                "max_balanced_accuracy": _format_decimal(row.get("max_balanced_accuracy")),
+            }
+        )
+    return display_rows
+
+
+def _effect_display_columns(parameter: str) -> tuple[str, ...]:
+    return (
+        parameter,
+        "count_experiments",
+        "mean_precision",
+        "mean_recall",
+        "mean_specificity",
+        "mean_f1",
+        "mean_balanced_accuracy",
+        "max_f1",
+        "max_balanced_accuracy",
+    )
+
+
+def _effect_interpretation(rows: list[dict[str, str]], *, parameter: str) -> str:
+    if len(rows) < 2:
+        return f"Not enough {parameter} groups were available for a trend statement."
+    first = rows[0]
+    last = rows[-1]
+    recall_delta = (_metric_value(last.get("mean_recall")) or 0.0) - (_metric_value(first.get("mean_recall")) or 0.0)
+    specificity_delta = (_metric_value(last.get("mean_specificity")) or 0.0) - (_metric_value(first.get("mean_specificity")) or 0.0)
+    balanced_delta = (_metric_value(last.get("mean_balanced_accuracy")) or 0.0) - (_metric_value(first.get("mean_balanced_accuracy")) or 0.0)
+    return (
+        f"Across the lowest to highest {parameter} groups, mean recall changes by {_format_delta(recall_delta)}, "
+        f"specificity by {_format_delta(specificity_delta)}, and balanced accuracy by {_format_delta(balanced_delta)}."
+    )
+
+
+def _frame_effect_display_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "radius_outside_fraction_threshold": row.get("radius_outside_fraction_threshold"),
+            "radius_min_outside_samples": row.get("radius_min_outside_samples"),
+            "stenosis_threshold": row.get("stenosis_threshold"),
+            "average_radius_threshold": row.get("average_radius_threshold"),
+            "mean_frame_f1": _format_decimal(row.get("mean_frame_f1")),
+            "max_frame_f1": _format_decimal(row.get("max_frame_f1")),
+            "mean_multiview_side_f1": _format_decimal(row.get("mean_multiview_side_f1")),
+            "max_multiview_side_f1": _format_decimal(row.get("max_multiview_side_f1")),
+        }
+        for row in rows
+    ]
+
+
+def _frame_effect_columns() -> tuple[str, ...]:
+    return (
+        "radius_outside_fraction_threshold",
+        "radius_min_outside_samples",
+        "stenosis_threshold",
+        "average_radius_threshold",
+        "mean_frame_f1",
+        "max_frame_f1",
+        "mean_multiview_side_f1",
+        "max_multiview_side_f1",
+    )
+
+
+def _variant_long_ranking_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, int, int]:
+    return (
+        -_variant_rank_number(row.get("f1")),
+        -_variant_rank_number(row.get("balanced_accuracy")),
+        -_variant_rank_number(row.get("recall")),
+        -_variant_rank_number(row.get("precision")),
+        -_variant_rank_number(row.get("specificity")),
+        _variant_rank_count(row.get("FP")),
+        _variant_rank_count(row.get("FN")),
+    )
+
+
+def _variant_wide_ranking_key(row: dict[str, Any], stage: str) -> tuple[float, float, float, float, float, int, int]:
+    fallback_stage = "multiview_patient" if stage == "multiview_side" and _metric_value(row.get("multiview_side_f1")) is None else stage
+    return (
+        -_variant_rank_number(row.get(f"{fallback_stage}_f1")),
+        -_variant_rank_number(row.get(f"{fallback_stage}_balanced_accuracy")),
+        -_variant_rank_number(row.get(f"{fallback_stage}_recall")),
+        -_variant_rank_number(row.get(f"{fallback_stage}_precision")),
+        -_variant_rank_number(row.get(f"{fallback_stage}_specificity")),
+        _variant_rank_count(row.get(f"{fallback_stage}_FP")),
+        _variant_rank_count(row.get(f"{fallback_stage}_FN")),
+    )
+
+
+def _variant_rank_number(value: Any) -> float:
+    number = _metric_value(value)
+    return float("-inf") if number is None else number
+
+
+def _variant_rank_count(value: Any) -> int:
+    number = _metric_value(value)
+    return 10**12 if number is None else int(number)
+
+
+def _recall_specificity_tradeoff_summary(rows: list[dict[str, str]]) -> str:
+    tradeoff_rows = [
+        row
+        for row in rows
+        if (
+            (_metric_value(row.get("delta_frame_to_temporal_recall")) or 0.0) > 0
+            and (_metric_value(row.get("delta_frame_to_temporal_specificity")) or 0.0) < 0
+        )
+        or (
+            (_metric_value(row.get("delta_temporal_to_multiview_recall")) or 0.0) > 0
+            and (_metric_value(row.get("delta_temporal_to_multiview_specificity")) or 0.0) < 0
+        )
+    ]
+    if not tradeoff_rows:
+        return "No recall-up/specificity-down stage transitions were found in stage_progression.csv."
+    strongest = max(
+        tradeoff_rows,
+        key=lambda row: max(
+            _metric_value(row.get("delta_frame_to_temporal_recall")) or 0.0,
+            _metric_value(row.get("delta_temporal_to_multiview_recall")) or 0.0,
+        ),
+    )
+    return f"Recall-up/specificity-down tradeoffs: {len(tradeoff_rows)} configurations; strongest example is {_short_config(strongest)}."
+
+
+def _best_stage_improvement_summary(temporal_delta: float | None, multiview_delta: float | None) -> str:
+    candidates = [
+        ("frame to temporal", temporal_delta),
+        ("temporal to multi-view", multiview_delta),
+    ]
+    valid = [(name, value) for name, value in candidates if value is not None]
+    if not valid:
+        return "No stage-level F1 improvement could be computed."
+    name, value = max(valid, key=lambda item: item[1])
+    return f"Best mean stage F1 improvement: {name} ({_format_delta(value)})."
+
+
+def _unique_count(rows: list[dict[str, str]], column: str) -> int:
+    return len({row.get(column) for row in rows if row.get(column) not in (None, "")})
+
+
+def _mean_metric_from_rows(rows: list[dict[str, str]], column: str) -> float | None:
+    values = [_metric_value(row.get(column)) for row in rows]
+    valid = [value for value in values if value is not None]
+    return None if not valid else sum(valid) / len(valid)
+
+
+def _format_delta(value: Any) -> str:
+    number = _metric_value(value)
+    if number is None:
+        return "n/a"
+    return f"{number:+.3f}"
+
+
+def _short_config(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("frame_variant") or "flat"),
+        str(row.get("temporal_variant") or "flat"),
+        f"fd={_format_number(row.get('frame_min_degree'))}",
+        f"mv={_format_number(row.get('multiview_min_score'))}",
+    ]
+    return " / ".join(parts)
+
+
+def _read_optional_csv(path: Path) -> list[dict[str, str]]:
+    return _read_csv(path) if path.is_file() else []
+
+
+def _generated_variant_files_markdown(table_paths: dict[str, Path], output_root: Path) -> list[str]:
+    return [
+        f"- [{_relative_path(path, output_root)}]({_relative_path(path, output_root)})"
+        for path in table_paths.values()
+    ]
+
+
+def _html_variant_file_list(table_paths: dict[str, Path], output_root: Path) -> str:
+    items = "".join(
+        f"<li>{_html_link(path, output_root, _relative_path(path, output_root))}</li>"
+        for path in table_paths.values()
+    )
+    return f"<ul>{items}</ul>"
 
 
 def plot_top_f1(rows: list[dict[str, Any]], prefix: str, output_path: Path) -> None:

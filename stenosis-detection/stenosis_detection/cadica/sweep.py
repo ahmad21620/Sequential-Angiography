@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import itertools
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -37,17 +38,22 @@ from .benchmark import (
     FRAME_RESULT_SUFFIX,
     MULTIVIEW_PATIENT_ROW_FIELDS,
     MULTIVIEW_SIDE_ROW_FIELDS,
+    MULTIVIEW_RESULT_FILENAME,
+    MultiViewPrediction,
     TEMPORAL_RESULT_FILENAME,
     VIDEO_PREDICTION_SOURCES,
     _build_patient_rows,
     _build_summary,
     _build_video_rows,
     _build_multiview_rows,
+    _candidate_patient_video_pairs,
     _cadica_patient_video_from_parts,
     _csv_value,
     _evaluate_frames,
-    _index_frame_predictions,
+    _extract_multiview_prediction,
+    _frame_prediction_image_keys,
     _lookup_frame_prediction,
+    _load_frame_prediction,
     _read_json_object,
     _threshold_points,
     _validate_inputs,
@@ -62,16 +68,128 @@ DEFAULT_MULTIVIEW_MIN_SCORES = [round(index * 0.05, 2) for index in range(21)]
 
 @dataclass(frozen=True, slots=True)
 class _SweepEvaluationJob:
+    experiment_index: int
     frame_min_degree: float
     box_margin_px: float
     video_prediction_source: str
     multiview_min_score: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class _FrameVariant:
+    name: str
+    prefix: tuple[str, ...]
+    root: Path
+    result_paths: tuple[Path, ...]
+    predictions: dict[Any, Any]
+    parsed_parameters: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _TemporalVariant:
+    name: str
+    prefix: tuple[str, ...]
+    frame_prefix: tuple[str, ...]
+    root: Path
+    result_paths: tuple[Path, ...]
+    predictions: dict[tuple[str, str], tuple[bool | None, float | None]]
+    parsed_parameters: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _MultiviewVariant:
+    name: str
+    prefix: tuple[str, ...]
+    frame_prefix: tuple[str, ...]
+    temporal_prefix: tuple[str, ...]
+    root: Path
+    result_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExperimentVariant:
+    frame_variant: str
+    temporal_variant: str
+    multiview_variant: str
+    frame_prefix: tuple[str, ...]
+    temporal_prefix: tuple[str, ...]
+    multiview_prefix: tuple[str, ...]
+    frame_root: Path
+    temporal_root: Path | None
+    multiview_root: Path | None
+    frame_result_paths: tuple[Path, ...]
+    temporal_result_paths: tuple[Path, ...]
+    multiview_result_paths: tuple[Path, ...]
+    frame_predictions: dict[Any, Any]
+    temporal_predictions: dict[tuple[str, str], tuple[bool | None, float | None]] | None
+    frame_parameters: dict[str, Any]
+    temporal_parameters: dict[str, Any]
+    evaluation_manifest_frames: list[Any]
+
+
 _WORKER_CONTEXT: dict[str, Any] = {}
 
 
+IDENTITY_COLUMNS = [
+    "frame_variant",
+    "temporal_variant",
+    "multiview_variant",
+    "radius_outside_fraction_threshold",
+    "radius_min_outside_samples",
+    "stenosis_threshold",
+    "average_radius_threshold",
+    "min_supporting_frames",
+    "min_persistence_ratio",
+]
+
+FRAME_PARAMETER_COLUMNS = [
+    "radius_outside_fraction_threshold",
+    "radius_min_outside_samples",
+    "stenosis_threshold",
+    "average_radius_threshold",
+]
+
+TEMPORAL_PARAMETER_COLUMNS = [
+    "min_supporting_frames",
+    "min_persistence_ratio",
+]
+
+LONG_METRIC_COLUMNS = [
+    "precision",
+    "recall",
+    "specificity",
+    "f1",
+    "balanced_accuracy",
+    "TP",
+    "FP",
+    "TN",
+    "FN",
+    "total_evaluated",
+    "positive_count",
+    "negative_count",
+]
+
+LONG_CSV_FIELDS = [
+    "stage",
+    *IDENTITY_COLUMNS,
+    "frame_min_degree",
+    "box_margin_px",
+    "video_prediction_source",
+    "multiview_min_score",
+    *LONG_METRIC_COLUMNS,
+]
+
+STAGE_PREFIXES = [
+    ("frame", "frame"),
+    ("temporal_frame_any", "video"),
+    ("temporal_final", "video"),
+    ("patient", "patient"),
+    ("multiview_patient", "multiview_patient"),
+    ("multiview_side", "multiview_side"),
+]
+
 SWEEP_CSV_FIELDS = [
+    *IDENTITY_COLUMNS,
     "frame_min_degree",
     "box_margin_px",
     "video_prediction_source",
@@ -186,23 +304,34 @@ def run_cadica_threshold_sweep(
     resolved_output_root.mkdir(parents=True, exist_ok=True)
 
     manifest_frames = load_cadica_manifest(resolved_manifest)
-    frame_predictions = _index_frame_predictions(resolved_frame_root)
-    evaluation_manifest_frames = (
-        _matched_manifest_frames(manifest_frames, frame_predictions)
-        if evaluate_matched_frames_only
-        else manifest_frames
+    frame_variants = _discover_frame_variants(resolved_frame_root)
+    temporal_variants = _discover_temporal_variants(resolved_temporal_root, frame_variants)
+    multiview_variants = _discover_multiview_variants(resolved_multiview_root, frame_variants, temporal_variants)
+    experiments, skipped_combinations = _build_experiment_variants(
+        frame_variants=frame_variants,
+        temporal_variants=temporal_variants,
+        multiview_variants=multiview_variants,
+        manifest_frames=manifest_frames,
+        evaluate_matched_frames_only=evaluate_matched_frames_only,
     )
+    if not experiments:
+        raise ValueError("No valid CADICA experiment combinations were found.")
     diagnostics = _build_cadica_sweep_diagnostics(
         manifest_frames=manifest_frames,
-        evaluation_manifest_frames=evaluation_manifest_frames,
-        frame_predictions=frame_predictions,
+        frame_variants=frame_variants,
+        temporal_variants=temporal_variants,
+        multiview_variants=multiview_variants,
+        experiments=experiments,
+        skipped_combinations=skipped_combinations,
         frame_results_root=resolved_frame_root,
         temporal_results_root=resolved_temporal_root,
+        multiview_results_root=resolved_multiview_root,
         frame_min_degrees=resolved_frame_min_degrees,
         evaluate_matched_frames_only=evaluate_matched_frames_only,
     )
 
     jobs = _build_sweep_jobs(
+        experiments=experiments,
         frame_min_degrees=resolved_frame_min_degrees,
         box_margins_px=resolved_box_margins,
         video_prediction_sources=resolved_sources,
@@ -215,23 +344,43 @@ def run_cadica_threshold_sweep(
         output_root=resolved_output_root,
         temporal_results_root=resolved_temporal_root,
         multiview_results_root=resolved_multiview_root,
-        manifest_frames=evaluation_manifest_frames,
-        frame_predictions=frame_predictions,
+        experiments=experiments,
         workers=resolved_workers,
     )
 
     csv_path = resolved_output_root / "cadica_threshold_sweep.csv"
     summary_path = resolved_output_root / "cadica_threshold_sweep_summary.json"
     diagnostics_path = resolved_output_root / "cadica_benchmark_diagnostics.json"
+    long_csv_path = resolved_output_root / "cadica_experiment_metrics_long.csv"
+    wide_csv_path = resolved_output_root / "cadica_experiment_metrics_wide.csv"
+    best_by_stage_path = resolved_output_root / "best_experiments_by_stage.csv"
+    best_overall_path = resolved_output_root / "best_overall_experiments.csv"
+    temporal_effects_path = resolved_output_root / "temporal_parameter_effects.csv"
+    frame_effects_path = resolved_output_root / "frame_parameter_effects.csv"
+    stage_progression_path = resolved_output_root / "stage_progression.csv"
     multiview_patient_rows_path = resolved_output_root / "cadica_multiview_patient_rows.csv"
     multiview_side_rows_path = resolved_output_root / "cadica_multiview_side_rows.csv"
+    long_rows = _build_long_metrics_rows(sweep_rows)
+    wide_rows = _build_wide_metrics_rows(long_rows)
+    best_by_stage_rows = _best_experiments_by_stage(long_rows)
+    best_overall_rows = _best_overall_experiments(wide_rows)
+    temporal_effect_rows = _temporal_parameter_effect_rows(long_rows)
+    frame_effect_rows = _frame_parameter_effect_rows(wide_rows)
+    stage_progression_rows = _stage_progression_rows(wide_rows)
     _write_csv(csv_path, sweep_rows, fieldnames=SWEEP_CSV_FIELDS)
+    _write_csv(long_csv_path, long_rows, fieldnames=LONG_CSV_FIELDS)
+    _write_csv(wide_csv_path, wide_rows, fieldnames=_wide_fieldnames(wide_rows))
+    _write_csv(best_by_stage_path, best_by_stage_rows, fieldnames=_best_by_stage_fieldnames(best_by_stage_rows))
+    _write_csv(best_overall_path, best_overall_rows, fieldnames=_best_overall_fieldnames(best_overall_rows))
+    _write_csv(temporal_effects_path, temporal_effect_rows, fieldnames=_effect_fieldnames(temporal_effect_rows, TEMPORAL_PARAMETER_COLUMNS))
+    _write_csv(frame_effects_path, frame_effect_rows, fieldnames=_frame_effect_fieldnames(frame_effect_rows))
+    _write_csv(stage_progression_path, stage_progression_rows, fieldnames=_stage_progression_fieldnames(stage_progression_rows))
     _write_json(diagnostics_path, diagnostics)
     multiview_row_paths = _write_multiview_review_rows(
         multiview_patient_rows_path=multiview_patient_rows_path,
         multiview_side_rows_path=multiview_side_rows_path,
-        manifest_frames=evaluation_manifest_frames,
-        multiview_results_root=resolved_multiview_root,
+        manifest_frames=manifest_frames,
+        experiments=experiments,
         multiview_min_score=_first_multiview_row_score(resolved_multiview_min_scores),
     )
     _write_json(
@@ -247,6 +396,7 @@ def run_cadica_threshold_sweep(
             box_margins_px=resolved_box_margins,
             video_prediction_sources=resolved_sources,
             multiview_min_scores=resolved_multiview_min_scores,
+            experiments=experiments,
             multiview_row_paths=multiview_row_paths,
             workers=resolved_workers,
             evaluate_matched_frames_only=evaluate_matched_frames_only,
@@ -256,6 +406,13 @@ def run_cadica_threshold_sweep(
         "cadica_threshold_sweep_csv": csv_path,
         "cadica_threshold_sweep_summary_json": summary_path,
         "cadica_benchmark_diagnostics_json": diagnostics_path,
+        "cadica_experiment_metrics_long_csv": long_csv_path,
+        "cadica_experiment_metrics_wide_csv": wide_csv_path,
+        "best_experiments_by_stage_csv": best_by_stage_path,
+        "best_overall_experiments_csv": best_overall_path,
+        "temporal_parameter_effects_csv": temporal_effects_path,
+        "frame_parameter_effects_csv": frame_effects_path,
+        "stage_progression_csv": stage_progression_path,
     }
     outputs.update(multiview_row_paths)
     return outputs
@@ -269,8 +426,7 @@ def _evaluate_sweep_jobs(
     output_root: Path,
     temporal_results_root: Path | None,
     multiview_results_root: Path | None,
-    manifest_frames: list[Any],
-    frame_predictions: dict[Any, Any],
+    experiments: list[_ExperimentVariant],
     workers: int,
 ) -> list[dict[str, Any]]:
     description = "Benchmarking CADICA sweep"
@@ -286,8 +442,7 @@ def _evaluate_sweep_jobs(
                         output_root=output_root,
                         temporal_results_root=temporal_results_root,
                         multiview_results_root=multiview_results_root,
-                        manifest_frames=manifest_frames,
-                        frame_predictions=frame_predictions,
+                        experiments=experiments,
                     )
                 )
                 progress.update(1)
@@ -303,8 +458,7 @@ def _evaluate_sweep_jobs(
             output_root,
             temporal_results_root,
             multiview_results_root,
-            manifest_frames,
-            frame_predictions,
+            experiments,
         ),
     ) as executor:
         row_iter = executor.map(
@@ -326,8 +480,7 @@ def _init_sweep_worker(
     output_root: Path,
     temporal_results_root: Path | None,
     multiview_results_root: Path | None,
-    manifest_frames: list[Any],
-    frame_predictions: dict[Any, Any],
+    experiments: list[_ExperimentVariant],
 ) -> None:
     _WORKER_CONTEXT.clear()
     _WORKER_CONTEXT.update(
@@ -337,8 +490,7 @@ def _init_sweep_worker(
             "output_root": output_root,
             "temporal_results_root": temporal_results_root,
             "multiview_results_root": multiview_results_root,
-            "manifest_frames": manifest_frames,
-            "frame_predictions": frame_predictions,
+            "experiments": experiments,
         }
     )
 
@@ -353,8 +505,7 @@ def _evaluate_sweep_job_from_worker(job: _SweepEvaluationJob) -> dict[str, Any]:
         output_root=_WORKER_CONTEXT["output_root"],
         temporal_results_root=_WORKER_CONTEXT["temporal_results_root"],
         multiview_results_root=_WORKER_CONTEXT["multiview_results_root"],
-        manifest_frames=_WORKER_CONTEXT["manifest_frames"],
-        frame_predictions=_WORKER_CONTEXT["frame_predictions"],
+        experiments=_WORKER_CONTEXT["experiments"],
     )
 
 
@@ -366,25 +517,36 @@ def _evaluate_sweep_job(
     output_root: Path,
     temporal_results_root: Path | None,
     multiview_results_root: Path | None,
-    manifest_frames: list[Any],
-    frame_predictions: dict[Any, Any],
+    experiments: list[_ExperimentVariant],
 ) -> dict[str, Any]:
+    experiment = experiments[job.experiment_index]
     frame_rows, box_rows, _unmatched_point_rows = _evaluate_frames(
-        manifest_frames,
-        frame_predictions,
+        experiment.evaluation_manifest_frames,
+        experiment.frame_predictions,
         frame_min_degree=job.frame_min_degree,
         box_margin_px=job.box_margin_px,
     )
     video_rows = _build_video_rows(
         frame_rows,
-        temporal_results_root=temporal_results_root,
+        temporal_results_root=experiment.temporal_root,
         video_prediction_source=job.video_prediction_source,
+        temporal_predictions=experiment.temporal_predictions,
     )
     patient_rows = _build_patient_rows(video_rows)
+    multiview_predictions = (
+        None
+        if not experiment.multiview_result_paths
+        else _index_multiview_predictions_from_paths(
+            experiment.multiview_result_paths,
+            experiment.multiview_root or multiview_results_root or output_root,
+            multiview_min_score=0.0 if job.multiview_min_score is None else job.multiview_min_score,
+        )
+    )
     multiview_patient_rows, multiview_side_rows, multiview_score_rule = _build_multiview_rows(
-        manifest_frames,
-        multiview_results_root=multiview_results_root,
+        experiment.evaluation_manifest_frames,
+        multiview_results_root=experiment.multiview_root,
         multiview_min_score=0.0 if job.multiview_min_score is None else job.multiview_min_score,
+        multiview_predictions=multiview_predictions,
     )
     summary = _build_summary(
         frame_rows,
@@ -396,8 +558,8 @@ def _evaluate_sweep_job(
         manifest=manifest,
         frame_results_root=frame_results_root,
         output_root=output_root,
-        temporal_results_root=temporal_results_root,
-        multiview_results_root=multiview_results_root,
+        temporal_results_root=experiment.temporal_root,
+        multiview_results_root=experiment.multiview_root,
         frame_min_degree=job.frame_min_degree,
         box_margin_px=job.box_margin_px,
         video_prediction_source=job.video_prediction_source,
@@ -407,11 +569,14 @@ def _evaluate_sweep_job(
         max_review_images=0,
         review_image_root=None,
     )
-    return _sweep_row_from_summary(summary, multiview_min_score=job.multiview_min_score)
+    row = _sweep_row_from_summary(summary, multiview_min_score=job.multiview_min_score)
+    row.update(_experiment_identity_columns(experiment))
+    return row
 
 
 def _build_sweep_jobs(
     *,
+    experiments: list[_ExperimentVariant],
     frame_min_degrees: list[float],
     box_margins_px: list[float],
     video_prediction_sources: list[str],
@@ -419,14 +584,16 @@ def _build_sweep_jobs(
 ) -> list[_SweepEvaluationJob]:
     jobs: list[_SweepEvaluationJob] = []
     combinations = itertools.product(
+        range(len(experiments)),
         frame_min_degrees,
         box_margins_px,
         video_prediction_sources,
         multiview_min_scores,
     )
-    for frame_min_degree, box_margin_px, video_prediction_source, multiview_min_score in combinations:
+    for experiment_index, frame_min_degree, box_margin_px, video_prediction_source, multiview_min_score in combinations:
         jobs.append(
             _SweepEvaluationJob(
+                experiment_index=experiment_index,
                 frame_min_degree=frame_min_degree,
                 box_margin_px=box_margin_px,
                 video_prediction_source=video_prediction_source,
@@ -434,6 +601,377 @@ def _build_sweep_jobs(
             )
         )
     return jobs
+
+
+def _discover_frame_variants(frame_results_root: Path) -> list[_FrameVariant]:
+    frame_paths = sorted(path for path in frame_results_root.rglob(f"*{FRAME_RESULT_SUFFIX}") if path.is_file())
+    if not frame_paths:
+        raise FileNotFoundError(f"No frame-level '*{FRAME_RESULT_SUFFIX}' files were found under: {frame_results_root}")
+
+    paths_by_prefix: dict[tuple[str, ...], list[Path]] = {}
+    for path in frame_paths:
+        prefix = _prefix_before_patient_video(path, frame_results_root)
+        paths_by_prefix.setdefault(prefix, []).append(path)
+
+    variants: list[_FrameVariant] = []
+    for prefix, paths in sorted(paths_by_prefix.items(), key=lambda item: _variant_name(item[0])):
+        root = _variant_root(frame_results_root, prefix)
+        predictions = _index_frame_predictions_from_paths(paths, root)
+        variants.append(
+            _FrameVariant(
+                name=_variant_name(prefix),
+                prefix=prefix,
+                root=root,
+                result_paths=tuple(paths),
+                predictions=predictions,
+                parsed_parameters=parse_cadica_variant_parameters(_variant_name(prefix), FRAME_PARAMETER_COLUMNS),
+            )
+        )
+    return variants
+
+
+def _discover_temporal_variants(
+    temporal_results_root: Path | None,
+    frame_variants: list[_FrameVariant],
+) -> list[_TemporalVariant]:
+    if temporal_results_root is None:
+        return []
+
+    temporal_paths = sorted(path for path in temporal_results_root.rglob(TEMPORAL_RESULT_FILENAME) if path.is_file())
+    frame_prefixes = {variant.prefix for variant in frame_variants}
+    paths_by_key: dict[tuple[tuple[str, ...], tuple[str, ...]], list[Path]] = {}
+    for path in temporal_paths:
+        raw_prefix = _prefix_before_patient_video(path, temporal_results_root)
+        frame_prefix, temporal_prefix = _split_temporal_prefix(raw_prefix, frame_prefixes)
+        paths_by_key.setdefault((frame_prefix, temporal_prefix), []).append(path)
+
+    variants: list[_TemporalVariant] = []
+    for (frame_prefix, temporal_prefix), paths in sorted(
+        paths_by_key.items(),
+        key=lambda item: (_variant_name(item[0][0]), _variant_name(item[0][1])),
+    ):
+        root = _variant_root(temporal_results_root, (*frame_prefix, *temporal_prefix))
+        variants.append(
+            _TemporalVariant(
+                name=_variant_name(temporal_prefix),
+                prefix=temporal_prefix,
+                frame_prefix=frame_prefix,
+                root=root,
+                result_paths=tuple(paths),
+                predictions=_index_temporal_predictions_from_paths(paths, temporal_results_root),
+                parsed_parameters=parse_cadica_variant_parameters(_variant_name(temporal_prefix), TEMPORAL_PARAMETER_COLUMNS),
+            )
+        )
+    return variants
+
+
+def _discover_multiview_variants(
+    multiview_results_root: Path | None,
+    frame_variants: list[_FrameVariant],
+    temporal_variants: list[_TemporalVariant],
+) -> list[_MultiviewVariant]:
+    if multiview_results_root is None:
+        return []
+
+    multiview_paths = sorted(path for path in multiview_results_root.rglob(MULTIVIEW_RESULT_FILENAME) if path.is_file())
+    frame_prefixes = {variant.prefix for variant in frame_variants}
+    temporal_keys = {(variant.frame_prefix, variant.prefix) for variant in temporal_variants}
+    if not temporal_keys:
+        temporal_keys = {(variant.prefix, ()) for variant in frame_variants}
+
+    paths_by_key: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[Path]] = {}
+    for path in multiview_paths:
+        raw_prefix = _prefix_before_patient_video(path, multiview_results_root)
+        frame_prefix, temporal_prefix, multiview_prefix = _split_multiview_prefix(
+            raw_prefix,
+            frame_prefixes=frame_prefixes,
+            temporal_keys=temporal_keys,
+        )
+        paths_by_key.setdefault((frame_prefix, temporal_prefix, multiview_prefix), []).append(path)
+
+    variants: list[_MultiviewVariant] = []
+    for (frame_prefix, temporal_prefix, multiview_prefix), paths in sorted(
+        paths_by_key.items(),
+        key=lambda item: (_variant_name(item[0][0]), _variant_name(item[0][1]), _variant_name(item[0][2])),
+    ):
+        root = _variant_root(multiview_results_root, (*frame_prefix, *temporal_prefix, *multiview_prefix))
+        variants.append(
+            _MultiviewVariant(
+                name=_variant_name(multiview_prefix),
+                prefix=multiview_prefix,
+                frame_prefix=frame_prefix,
+                temporal_prefix=temporal_prefix,
+                root=root,
+                result_paths=tuple(paths),
+            )
+        )
+    return variants
+
+
+def _build_experiment_variants(
+    *,
+    frame_variants: list[_FrameVariant],
+    temporal_variants: list[_TemporalVariant],
+    multiview_variants: list[_MultiviewVariant],
+    manifest_frames: list[Any],
+    evaluate_matched_frames_only: bool,
+) -> tuple[list[_ExperimentVariant], list[dict[str, Any]]]:
+    frame_by_prefix = {variant.prefix: variant for variant in frame_variants}
+    multiview_by_key = {
+        (variant.frame_prefix, variant.temporal_prefix): variant
+        for variant in multiview_variants
+        if not variant.prefix
+    }
+    skipped: list[dict[str, Any]] = []
+    experiments: list[_ExperimentVariant] = []
+
+    if temporal_variants:
+        iterable: list[tuple[_FrameVariant | None, _TemporalVariant | None]] = [
+            (frame_by_prefix.get(temporal_variant.frame_prefix), temporal_variant)
+            for temporal_variant in temporal_variants
+        ]
+    else:
+        iterable = [(frame_variant, None) for frame_variant in frame_variants]
+
+    for frame_variant, temporal_variant in iterable:
+        if frame_variant is None:
+            skipped.append(
+                {
+                    "reason": "temporal_result_has_no_corresponding_frame_result",
+                    "temporal_variant": "" if temporal_variant is None else temporal_variant.name,
+                    "frame_prefix": _prefix_text(temporal_variant.frame_prefix if temporal_variant is not None else ()),
+                }
+            )
+            continue
+
+        temporal_prefix = () if temporal_variant is None else temporal_variant.prefix
+        multiview_variant = multiview_by_key.get((frame_variant.prefix, temporal_prefix))
+        if multiview_variants and multiview_variant is None:
+            skipped.append(
+                {
+                    "reason": "missing_corresponding_multiview_result",
+                    "frame_variant": frame_variant.name,
+                    "temporal_variant": "flat" if temporal_variant is None else temporal_variant.name,
+                }
+            )
+
+        evaluation_manifest_frames = (
+            _matched_manifest_frames(manifest_frames, frame_variant.predictions)
+            if evaluate_matched_frames_only
+            else list(manifest_frames)
+        )
+        experiments.append(
+            _ExperimentVariant(
+                frame_variant=frame_variant.name,
+                temporal_variant="flat" if temporal_variant is None else temporal_variant.name,
+                multiview_variant="" if multiview_variant is None else multiview_variant.name,
+                frame_prefix=frame_variant.prefix,
+                temporal_prefix=temporal_prefix,
+                multiview_prefix=() if multiview_variant is None else multiview_variant.prefix,
+                frame_root=frame_variant.root,
+                temporal_root=None if temporal_variant is None else temporal_variant.root,
+                multiview_root=None if multiview_variant is None else multiview_variant.root,
+                frame_result_paths=frame_variant.result_paths,
+                temporal_result_paths=() if temporal_variant is None else temporal_variant.result_paths,
+                multiview_result_paths=() if multiview_variant is None else multiview_variant.result_paths,
+                frame_predictions=frame_variant.predictions,
+                temporal_predictions=None if temporal_variant is None else temporal_variant.predictions,
+                frame_parameters=frame_variant.parsed_parameters,
+                temporal_parameters={} if temporal_variant is None else temporal_variant.parsed_parameters,
+                evaluation_manifest_frames=evaluation_manifest_frames,
+            )
+        )
+
+    for multiview_variant in multiview_variants:
+        if (multiview_variant.frame_prefix, multiview_variant.temporal_prefix) not in {
+            (experiment.frame_prefix, experiment.temporal_prefix) for experiment in experiments
+        }:
+            skipped.append(
+                {
+                    "reason": "multiview_result_has_no_corresponding_temporal_result",
+                    "frame_variant": _variant_name(multiview_variant.frame_prefix),
+                    "temporal_variant": _variant_name(multiview_variant.temporal_prefix),
+                    "multiview_variant": multiview_variant.name,
+                }
+            )
+
+    return experiments, skipped
+
+
+def parse_cadica_variant_parameters(variant_name: str, expected_columns: Iterable[str] | None = None) -> dict[str, Any]:
+    expected = set(expected_columns or [])
+    parsed: dict[str, Any] = {column: None for column in expected}
+    if not variant_name or variant_name == "flat":
+        return parsed
+
+    for part in variant_name.split("__"):
+        key, value = _split_variant_parameter(part)
+        if key is None:
+            continue
+        if expected and key not in expected:
+            continue
+        parsed[key] = value
+    return parsed
+
+
+def _split_variant_parameter(part: str) -> tuple[str | None, Any]:
+    match = re.fullmatch(r"(.+)_(-?\d+(?:p\d+)?|-?\d+(?:\.\d+)?)", part.strip())
+    if match is None:
+        return None, None
+    return match.group(1), _parse_variant_value(match.group(2))
+
+
+def _parse_variant_value(raw_value: str) -> int | float | str:
+    normalized = raw_value.replace("p", ".")
+    try:
+        if re.fullmatch(r"-?\d+", normalized):
+            return int(normalized)
+        return float(normalized)
+    except ValueError:
+        return raw_value
+
+
+def _prefix_before_patient_video(path: Path, root: Path) -> tuple[str, ...]:
+    parts = _relative_parts(path, root)
+    patient_index = _cadica_patient_video_index(parts)
+    return () if patient_index is None else tuple(parts[:patient_index])
+
+
+def _variant_root(root: Path, prefix: tuple[str, ...]) -> Path:
+    resolved = root
+    for part in prefix:
+        resolved = resolved / part
+    return resolved
+
+
+def _variant_name(prefix: tuple[str, ...]) -> str:
+    return "/".join(prefix) if prefix else "flat"
+
+
+def _split_temporal_prefix(
+    raw_prefix: tuple[str, ...],
+    frame_prefixes: set[tuple[str, ...]],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not raw_prefix:
+        return (), ()
+    for frame_prefix in sorted(frame_prefixes, key=len, reverse=True):
+        if _starts_with(raw_prefix, frame_prefix):
+            return frame_prefix, tuple(raw_prefix[len(frame_prefix):])
+    if () in frame_prefixes:
+        return (), raw_prefix
+    return raw_prefix[:-1], raw_prefix[-1:]
+
+
+def _split_multiview_prefix(
+    raw_prefix: tuple[str, ...],
+    *,
+    frame_prefixes: set[tuple[str, ...]],
+    temporal_keys: set[tuple[tuple[str, ...], tuple[str, ...]]],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    matching_frame_prefixes = [
+        frame_prefix for frame_prefix in frame_prefixes if _starts_with(raw_prefix, frame_prefix)
+    ]
+    for frame_prefix in sorted(matching_frame_prefixes, key=len, reverse=True):
+        remainder = tuple(raw_prefix[len(frame_prefix):])
+        matching_temporal_prefixes = [
+            temporal_prefix
+            for candidate_frame_prefix, temporal_prefix in temporal_keys
+            if candidate_frame_prefix == frame_prefix and _starts_with(remainder, temporal_prefix)
+        ]
+        if matching_temporal_prefixes:
+            temporal_prefix = max(matching_temporal_prefixes, key=len)
+            return frame_prefix, temporal_prefix, tuple(remainder[len(temporal_prefix):])
+    frame_prefix, temporal_prefix = _split_temporal_prefix(raw_prefix, frame_prefixes)
+    return frame_prefix, temporal_prefix, ()
+
+
+def _starts_with(value: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    return len(prefix) <= len(value) and value[: len(prefix)] == prefix
+
+
+def _index_frame_predictions_from_paths(paths: Iterable[Path], variant_root: Path) -> dict[Any, Any]:
+    predictions: dict[Any, Any] = {}
+    for result_path in sorted(paths):
+        prediction = _load_frame_prediction(result_path)
+        patient_video_pairs = _candidate_patient_video_pairs(result_path, variant_root, prediction.view_id)
+        for patient_id, video_id in patient_video_pairs:
+            image_keys = _frame_prediction_image_keys(prediction, patient_id=patient_id, video_id=video_id)
+            for image_key in image_keys:
+                if image_key:
+                    predictions.setdefault((patient_id, video_id, image_key), prediction)
+    return predictions
+
+
+def _index_temporal_predictions_from_paths(
+    paths: Iterable[Path],
+    temporal_results_root: Path,
+) -> dict[tuple[str, str], tuple[bool | None, float | None]]:
+    predictions: dict[tuple[str, str], tuple[bool | None, float | None]] = {}
+    for result_path in sorted(paths):
+        patient_video_pair = _cadica_patient_video_from_parts(_relative_parts(result_path, temporal_results_root))
+        if patient_video_pair is None:
+            continue
+        patient_id, video_id = patient_video_pair
+        predictions.setdefault((patient_id.lower(), video_id.lower()), _extract_temporal_prediction(result_path))
+    return predictions
+
+
+def _extract_temporal_prediction(result_path: Path) -> tuple[bool | None, float | None]:
+    payload = _read_json_object(result_path)
+    final_lesion = payload.get("final_lesion")
+    if not isinstance(final_lesion, dict):
+        return False, 0.0
+    degrees = final_lesion.get("degrees") if isinstance(final_lesion.get("degrees"), dict) else {}
+    score = _coerce_float(degrees.get("median")) or _coerce_float(degrees.get("max")) or 1.0
+    return True, score
+
+
+def _index_multiview_predictions_from_paths(
+    paths: Iterable[Path],
+    multiview_results_root: Path,
+    *,
+    multiview_min_score: float,
+) -> dict[str, MultiViewPrediction]:
+    predictions: dict[str, MultiViewPrediction] = {}
+    for result_path in sorted(paths):
+        patient_id = _cadica_patient_id_from_multiview_path(result_path, multiview_results_root)
+        if patient_id is None:
+            continue
+        payload = _read_json_object(result_path)
+        predictions.setdefault(
+            patient_id,
+            _extract_multiview_prediction(result_path, payload, multiview_min_score=multiview_min_score),
+        )
+    return predictions
+
+
+def _cadica_patient_id_from_multiview_path(result_path: Path, root: Path) -> str | None:
+    for part in reversed(_relative_parts(result_path, root)[:-1]):
+        if CADICA_PATIENT_ID_RE.fullmatch(part):
+            return part
+    return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _experiment_identity_columns(experiment: _ExperimentVariant) -> dict[str, Any]:
+    row = {
+        "frame_variant": experiment.frame_variant,
+        "temporal_variant": experiment.temporal_variant,
+        "multiview_variant": experiment.multiview_variant,
+    }
+    for column in FRAME_PARAMETER_COLUMNS:
+        row[column] = experiment.frame_parameters.get(column)
+    for column in TEMPORAL_PARAMETER_COLUMNS:
+        row[column] = experiment.temporal_parameters.get(column)
+    return row
 
 
 def parse_float_list(value: str) -> list[float]:
@@ -623,10 +1161,14 @@ def _matched_manifest_frames(manifest_frames: list[Any], frame_predictions: dict
 def _build_cadica_sweep_diagnostics(
     *,
     manifest_frames: list[Any],
-    evaluation_manifest_frames: list[Any],
-    frame_predictions: dict[Any, Any],
+    frame_variants: list[_FrameVariant],
+    temporal_variants: list[_TemporalVariant],
+    multiview_variants: list[_MultiviewVariant],
+    experiments: list[_ExperimentVariant],
+    skipped_combinations: list[dict[str, Any]],
     frame_results_root: Path,
     temporal_results_root: Path | None,
+    multiview_results_root: Path | None,
     frame_min_degrees: list[float],
     evaluate_matched_frames_only: bool,
 ) -> dict[str, Any]:
@@ -636,31 +1178,86 @@ def _build_cadica_sweep_diagnostics(
         if temporal_results_root is None
         else sorted(path for path in temporal_results_root.rglob(TEMPORAL_RESULT_FILENAME) if path.is_file())
     )
-    frame_sources = _unique_frame_prediction_sources(frame_predictions)
+    multiview_paths = (
+        []
+        if multiview_results_root is None
+        else sorted(path for path in multiview_results_root.rglob(MULTIVIEW_RESULT_FILENAME) if path.is_file())
+    )
+    all_frame_predictions: dict[Any, Any] = {}
+    for frame_variant in frame_variants:
+        for key, prediction in frame_variant.predictions.items():
+            all_frame_predictions.setdefault((*frame_variant.prefix, *key), prediction)
+    frame_sources = _unique_frame_prediction_sources(all_frame_predictions)
     frame_json_summary = _summarize_frame_jsons(frame_paths, frame_results_root)
-    manifest_summary = _summarize_manifest_matches(
+    manifest_by_variant = _manifest_matching_by_variant(
         manifest_frames=manifest_frames,
-        evaluation_manifest_frames=evaluation_manifest_frames,
-        frame_predictions=frame_predictions,
+        frame_variants=frame_variants,
+        experiments=experiments,
         frame_min_degrees=frame_min_degrees,
         evaluate_matched_frames_only=evaluate_matched_frames_only,
     )
-    temporal_summary = _summarize_temporal_results(
-        temporal_paths=temporal_paths,
-        temporal_results_root=temporal_results_root,
+    first_manifest_summary = next(iter(manifest_by_variant.values()), None) or {
+        "evaluate_matched_frames_only": evaluate_matched_frames_only,
+        "manifest_frame_count": len(manifest_frames),
+        "matched_manifest_frames": 0,
+        "evaluated_frame_count": 0,
+    }
+    temporal_summary = _summarize_temporal_results_by_variant(
+        temporal_variants=temporal_variants,
         manifest_frames=manifest_frames,
-        frame_predictions=frame_predictions,
+        frame_variants=frame_variants,
         frame_min_degrees=frame_min_degrees,
     )
+    warnings = _variant_diagnostics_warnings(
+        frame_variants=frame_variants,
+        temporal_variants=temporal_variants,
+        multiview_variants=multiview_variants,
+        experiments=experiments,
+        skipped_combinations=skipped_combinations,
+    )
     return {
+        "variant_counts": {
+            "frame_variants_found": len(frame_variants),
+            "temporal_variants_found": len(temporal_variants),
+            "multiview_variants_found": len(multiview_variants),
+            "valid_experiment_combinations": len(experiments),
+            "valid_full_experiment_combinations": sum(1 for experiment in experiments if experiment.multiview_result_paths),
+        },
+        "variants": {
+            "frame_variants": [variant.name for variant in frame_variants],
+            "temporal_variants": sorted({variant.name for variant in temporal_variants}),
+            "multiview_variants": sorted({variant.name for variant in multiview_variants}),
+        },
+        "skipped_missing_combinations": skipped_combinations,
+        "warnings": warnings,
         "frame_results": {
             **frame_json_summary,
-            "indexed_prediction_key_count": len(frame_predictions),
+            "variant_count": len(frame_variants),
+            "indexed_prediction_key_count": sum(len(variant.predictions) for variant in frame_variants),
             "unique_indexed_prediction_file_count": len(frame_sources),
-            "created_key_examples": _frame_key_examples(frame_predictions, frame_results_root),
+            "created_key_examples": _frame_key_examples(
+                frame_variants[0].predictions if frame_variants else {},
+                frame_variants[0].root if frame_variants else frame_results_root,
+            ),
         },
-        "manifest_matching": manifest_summary,
+        "manifest_matching": {
+            **first_manifest_summary,
+            "per_frame_variant": manifest_by_variant,
+        },
         "temporal_results": temporal_summary,
+        "multiview_results": {
+            "json_file_count": len(multiview_paths),
+            "variant_count": len(multiview_variants),
+            "per_variant": {
+                f"{_variant_name(variant.frame_prefix)}::{_variant_name(variant.temporal_prefix)}::{variant.name}": {
+                    "frame_variant": _variant_name(variant.frame_prefix),
+                    "temporal_variant": _variant_name(variant.temporal_prefix),
+                    "multiview_variant": variant.name,
+                    "json_file_count": len(variant.result_paths),
+                }
+                for variant in multiview_variants
+            },
+        },
         "staleness_and_root_hints": _summarize_staleness_and_roots(
             frame_paths=frame_paths,
             temporal_paths=temporal_paths,
@@ -754,6 +1351,136 @@ def _summarize_manifest_matches(
         "matched_manifest_frames_with_stenosis_points": matched_with_points,
         "matched_manifest_frames_with_thresholded_points_by_frame_min_degree": threshold_counts,
         "unmatched_manifest_frame_examples": unmatched_examples,
+    }
+
+
+def _manifest_matching_by_variant(
+    *,
+    manifest_frames: list[Any],
+    frame_variants: list[_FrameVariant],
+    experiments: list[_ExperimentVariant],
+    frame_min_degrees: list[float],
+    evaluate_matched_frames_only: bool,
+) -> dict[str, dict[str, Any]]:
+    experiment_by_frame_prefix: dict[tuple[str, ...], _ExperimentVariant] = {}
+    for experiment in experiments:
+        experiment_by_frame_prefix.setdefault(experiment.frame_prefix, experiment)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for frame_variant in frame_variants:
+        experiment = experiment_by_frame_prefix.get(frame_variant.prefix)
+        evaluation_manifest_frames = (
+            experiment.evaluation_manifest_frames
+            if experiment is not None
+            else _matched_manifest_frames(manifest_frames, frame_variant.predictions)
+            if evaluate_matched_frames_only
+            else manifest_frames
+        )
+        summaries[frame_variant.name] = _summarize_manifest_matches(
+            manifest_frames=manifest_frames,
+            evaluation_manifest_frames=evaluation_manifest_frames,
+            frame_predictions=frame_variant.predictions,
+            frame_min_degrees=frame_min_degrees,
+            evaluate_matched_frames_only=evaluate_matched_frames_only,
+        )
+    return summaries
+
+
+def _summarize_temporal_results_by_variant(
+    *,
+    temporal_variants: list[_TemporalVariant],
+    manifest_frames: list[Any],
+    frame_variants: list[_FrameVariant],
+    frame_min_degrees: list[float],
+) -> dict[str, Any]:
+    if not temporal_variants:
+        return {
+            "json_file_count": 0,
+            "indexed_patient_video_count": 0,
+            "temporal_final_positive_count": 0,
+            "note": "No temporal_results_root was supplied or no temporal result JSONs were found.",
+            "per_variant": {},
+        }
+
+    frame_by_prefix = {variant.prefix: variant for variant in frame_variants}
+    per_variant: dict[str, Any] = {}
+    aggregate_positive_thresholds = {_threshold_key(value): 0 for value in frame_min_degrees}
+    aggregate = {
+        "json_file_count": 0,
+        "indexed_patient_video_count": 0,
+        "temporal_final_positive_count": 0,
+        "positive_temporal_with_any_matched_frame_stenosis_points": 0,
+    }
+    examples: list[dict[str, Any]] = []
+    unindexed_examples: list[str] = []
+
+    for temporal_variant in temporal_variants:
+        frame_variant = frame_by_prefix.get(temporal_variant.frame_prefix)
+        summary = _summarize_temporal_results(
+            temporal_paths=list(temporal_variant.result_paths),
+            temporal_results_root=temporal_variant.root,
+            manifest_frames=manifest_frames,
+            frame_predictions={} if frame_variant is None else frame_variant.predictions,
+            frame_min_degrees=frame_min_degrees,
+        )
+        key = f"{_variant_name(temporal_variant.frame_prefix)}::{temporal_variant.name}"
+        per_variant[key] = {
+            "frame_variant": _variant_name(temporal_variant.frame_prefix),
+            "temporal_variant": temporal_variant.name,
+            **summary,
+        }
+        for aggregate_key in aggregate:
+            aggregate[aggregate_key] += int(summary.get(aggregate_key) or 0)
+        threshold_counts = summary.get("positive_temporal_with_thresholded_frame_by_frame_min_degree")
+        if isinstance(threshold_counts, dict):
+            for threshold_key, count in threshold_counts.items():
+                aggregate_positive_thresholds[threshold_key] = aggregate_positive_thresholds.get(threshold_key, 0) + int(count)
+        unindexed_examples.extend(str(item) for item in summary.get("unindexed_temporal_json_examples", [])[:10])
+        examples.extend(
+            item
+            for item in summary.get("positive_temporal_without_underlying_positive_frame_examples", [])
+            if isinstance(item, dict)
+        )
+
+    return {
+        **aggregate,
+        "unindexed_temporal_json_examples": unindexed_examples[:10],
+        "positive_temporal_with_thresholded_frame_by_frame_min_degree": aggregate_positive_thresholds,
+        "positive_temporal_without_underlying_positive_frame_examples": examples[:10],
+        "variant_count": len(temporal_variants),
+        "per_variant": per_variant,
+    }
+
+
+def _variant_diagnostics_warnings(
+    *,
+    frame_variants: list[_FrameVariant],
+    temporal_variants: list[_TemporalVariant],
+    multiview_variants: list[_MultiviewVariant],
+    experiments: list[_ExperimentVariant],
+    skipped_combinations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    warning_items: list[str] = []
+    if len(frame_variants) > 1 or len(temporal_variants) > 1 or len(multiview_variants) > 1:
+        warning_items.append("Variant-aware evaluation is active; prediction dictionaries are scoped per experiment.")
+    if not experiments:
+        warning_items.append("No valid experiment combinations were found.")
+    for skipped in skipped_combinations:
+        reason = str(skipped.get("reason") or "")
+        if reason == "temporal_result_has_no_corresponding_frame_result":
+            warning_items.append(
+                "Temporal result has no corresponding frame result: "
+                f"{skipped.get('frame_prefix')} / {skipped.get('temporal_variant')}"
+            )
+        elif reason == "multiview_result_has_no_corresponding_temporal_result":
+            warning_items.append(
+                "Multiview result has no corresponding temporal result: "
+                f"{skipped.get('frame_variant')} / {skipped.get('temporal_variant')}"
+            )
+    return {
+        "variants_collapsed": False,
+        "variant_collapse_warning": "",
+        "items": warning_items,
     }
 
 
@@ -1003,20 +1730,37 @@ def _write_multiview_review_rows(
     multiview_patient_rows_path: Path,
     multiview_side_rows_path: Path,
     manifest_frames: list[Any],
-    multiview_results_root: Path | None,
+    experiments: list[_ExperimentVariant],
     multiview_min_score: float,
 ) -> dict[str, Path]:
-    if multiview_results_root is None:
+    multiview_experiments = [experiment for experiment in experiments if experiment.multiview_result_paths]
+    if not multiview_experiments:
         return {}
-    patient_rows, side_rows, _score_rule = _build_multiview_rows(
-        manifest_frames,
-        multiview_results_root=multiview_results_root,
-        multiview_min_score=multiview_min_score,
-    )
-    _write_csv(multiview_patient_rows_path, patient_rows, fieldnames=MULTIVIEW_PATIENT_ROW_FIELDS)
+
+    patient_rows: list[dict[str, Any]] = []
+    side_rows: list[dict[str, Any]] = []
+    for experiment in multiview_experiments:
+        predictions = _index_multiview_predictions_from_paths(
+            experiment.multiview_result_paths,
+            experiment.multiview_root or multiview_patient_rows_path.parent,
+            multiview_min_score=multiview_min_score,
+        )
+        experiment_patient_rows, experiment_side_rows, _score_rule = _build_multiview_rows(
+            manifest_frames,
+            multiview_results_root=experiment.multiview_root,
+            multiview_min_score=multiview_min_score,
+            multiview_predictions=predictions,
+        )
+        identity = _experiment_identity_columns(experiment)
+        patient_rows.extend({**identity, **row} for row in experiment_patient_rows)
+        side_rows.extend({**identity, **row} for row in experiment_side_rows)
+
+    patient_fields = [*IDENTITY_COLUMNS, *MULTIVIEW_PATIENT_ROW_FIELDS]
+    side_fields = [*IDENTITY_COLUMNS, *MULTIVIEW_SIDE_ROW_FIELDS]
+    _write_csv(multiview_patient_rows_path, patient_rows, fieldnames=patient_fields)
     outputs = {"cadica_multiview_patient_rows_csv": multiview_patient_rows_path}
     if side_rows:
-        _write_csv(multiview_side_rows_path, side_rows, fieldnames=MULTIVIEW_SIDE_ROW_FIELDS)
+        _write_csv(multiview_side_rows_path, side_rows, fieldnames=side_fields)
         outputs["cadica_multiview_side_rows_csv"] = multiview_side_rows_path
     return outputs
 
@@ -1055,6 +1799,446 @@ def _sweep_row_from_summary(summary: dict[str, Any], *, multiview_min_score: flo
             include_accuracy=False,
         ),
     }
+
+
+def _build_long_metrics_rows(sweep_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for _key, grouped_rows in _group_sweep_rows(sweep_rows).items():
+        source_rows = {str(row.get("video_prediction_source") or ""): row for row in grouped_rows}
+        preferred_row = _preferred_source_row(grouped_rows)
+        if preferred_row is None:
+            continue
+
+        rows.append(_long_row_from_sweep_row(preferred_row, stage="frame", metric_prefix="frame"))
+        if "frame_any" in source_rows:
+            rows.append(
+                _long_row_from_sweep_row(
+                    source_rows["frame_any"],
+                    stage="temporal_frame_any",
+                    metric_prefix="video",
+                    video_prediction_source="frame_any",
+                )
+            )
+        if "temporal_final" in source_rows:
+            rows.append(
+                _long_row_from_sweep_row(
+                    source_rows["temporal_final"],
+                    stage="temporal_final",
+                    metric_prefix="video",
+                    video_prediction_source="temporal_final",
+                )
+            )
+        rows.append(_long_row_from_sweep_row(preferred_row, stage="patient", metric_prefix="patient"))
+        if _metric_value(preferred_row, "multiview_patient_total_evaluated") is not None:
+            rows.append(_long_row_from_sweep_row(preferred_row, stage="multiview_patient", metric_prefix="multiview_patient"))
+        if _metric_value(preferred_row, "multiview_side_total_evaluated") is not None:
+            rows.append(_long_row_from_sweep_row(preferred_row, stage="multiview_side", metric_prefix="multiview_side"))
+    return rows
+
+
+def _long_row_from_sweep_row(
+    row: dict[str, Any],
+    *,
+    stage: str,
+    metric_prefix: str,
+    video_prediction_source: str | None = None,
+) -> dict[str, Any]:
+    true_positive = _metric_value(row, f"{metric_prefix}_TP")
+    false_positive = _metric_value(row, f"{metric_prefix}_FP")
+    true_negative = _metric_value(row, f"{metric_prefix}_TN")
+    false_negative = _metric_value(row, f"{metric_prefix}_FN")
+    long_row = {
+        "stage": stage,
+        **{column: row.get(column) for column in IDENTITY_COLUMNS},
+        "frame_min_degree": row.get("frame_min_degree"),
+        "box_margin_px": row.get("box_margin_px"),
+        "video_prediction_source": video_prediction_source or row.get("video_prediction_source"),
+        "multiview_min_score": row.get("multiview_min_score"),
+        "precision": _metric_value(row, f"{metric_prefix}_precision"),
+        "recall": _metric_value(row, f"{metric_prefix}_recall"),
+        "specificity": _metric_value(row, f"{metric_prefix}_specificity"),
+        "f1": _metric_value(row, f"{metric_prefix}_F1"),
+        "balanced_accuracy": _metric_value(row, f"{metric_prefix}_balanced_accuracy"),
+        "TP": _count_or_none(true_positive),
+        "FP": _count_or_none(false_positive),
+        "TN": _count_or_none(true_negative),
+        "FN": _count_or_none(false_negative),
+        "total_evaluated": _count_or_none(_metric_value(row, f"{metric_prefix}_total_evaluated")),
+        "positive_count": _count_or_none(_sum_optional(true_positive, false_negative)),
+        "negative_count": _count_or_none(_sum_optional(true_negative, false_positive)),
+    }
+    return long_row
+
+
+def _build_wide_metrics_rows(long_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for long_row in long_rows:
+        key = _wide_group_key(long_row)
+        wide_row = rows_by_key.setdefault(
+            key,
+            {
+                **{column: long_row.get(column) for column in IDENTITY_COLUMNS},
+                "frame_min_degree": long_row.get("frame_min_degree"),
+                "box_margin_px": long_row.get("box_margin_px"),
+                "video_prediction_source": long_row.get("video_prediction_source"),
+                "multiview_min_score": long_row.get("multiview_min_score"),
+            },
+        )
+        stage = str(long_row.get("stage") or "")
+        if stage == "temporal_final":
+            wide_row["video_prediction_source"] = "temporal_final"
+        for metric_name in LONG_METRIC_COLUMNS:
+            wide_row[f"{stage}_{metric_name}"] = long_row.get(metric_name)
+    return list(rows_by_key.values())
+
+
+def _best_experiments_by_stage(long_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked_rows: list[dict[str, Any]] = []
+    for stage in [stage for stage, _prefix in STAGE_PREFIXES]:
+        candidates = [row for row in long_rows if row.get("stage") == stage and _numeric(row.get("f1")) is not None]
+        for rank, row in enumerate(sorted(candidates, key=_long_ranking_key), start=1):
+            ranked_rows.append({"rank": rank, **row})
+    return ranked_rows
+
+
+def _best_overall_experiments(wide_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(wide_rows, key=_overall_ranking_key)
+    rows: list[dict[str, Any]] = []
+    for rank, row in enumerate(ranked, start=1):
+        metric_stage = "multiview_side" if _numeric(row.get("multiview_side_f1")) is not None else "multiview_patient"
+        rows.append({"rank": rank, "overall_rank_metric_stage": metric_stage, **row})
+    return rows
+
+
+def _parameter_effect_rows(
+    long_rows: list[dict[str, Any]],
+    *,
+    group_columns: list[str],
+    stage: str,
+) -> list[dict[str, Any]]:
+    rows = [row for row in long_rows if row.get("stage") == stage]
+    if not rows and stage == "temporal_final":
+        rows = [row for row in long_rows if row.get("stage") == "temporal_frame_any"]
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(tuple(row.get(column) for column in group_columns), []).append(row)
+
+    effect_rows: list[dict[str, Any]] = []
+    for key, group_rows in sorted(grouped.items(), key=lambda item: tuple("" if value is None else str(value) for value in item[0])):
+        best_f1 = min(group_rows, key=_long_ranking_key)
+        best_balanced = min(group_rows, key=lambda row: _long_ranking_key_for_metric(row, "balanced_accuracy"))
+        effect_row: dict[str, Any] = {
+            column: key[index] for index, column in enumerate(group_columns)
+        }
+        effect_row.update(
+            {
+                "stage": stage,
+                "count_experiments": len(group_rows),
+                "max_f1": _max_metric(group_rows, "f1"),
+                "max_balanced_accuracy": _max_metric(group_rows, "balanced_accuracy"),
+                "best_config": _config_label(best_f1),
+                "best_balanced_accuracy_config": _config_label(best_balanced),
+            }
+        )
+        for metric in ("precision", "recall", "specificity", "f1", "balanced_accuracy", "TP", "FP", "TN", "FN"):
+            effect_row[f"mean_{metric}"] = _mean_metric(group_rows, metric)
+        effect_rows.append(effect_row)
+    return effect_rows
+
+
+def _temporal_parameter_effect_rows(long_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for group_columns in (["min_supporting_frames"], ["min_persistence_ratio"], TEMPORAL_PARAMETER_COLUMNS):
+        group_rows = _parameter_effect_rows(long_rows, group_columns=group_columns, stage="temporal_final")
+        group_by = ",".join(group_columns)
+        for row in group_rows:
+            for column in TEMPORAL_PARAMETER_COLUMNS:
+                row.setdefault(column, None)
+            row["group_by"] = group_by
+        rows.extend(group_rows)
+    return rows
+
+
+def _frame_parameter_effect_rows(wide_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in wide_rows:
+        grouped.setdefault(tuple(row.get(column) for column in FRAME_PARAMETER_COLUMNS), []).append(row)
+
+    effect_rows: list[dict[str, Any]] = []
+    for key, rows in sorted(grouped.items(), key=lambda item: tuple("" if value is None else str(value) for value in item[0])):
+        best_frame = min(rows, key=lambda row: _wide_stage_ranking_key(row, "frame"))
+        best_downstream = min(rows, key=lambda row: _wide_stage_ranking_key(row, "multiview_side"))
+        effect_row: dict[str, Any] = {column: key[index] for index, column in enumerate(FRAME_PARAMETER_COLUMNS)}
+        effect_row.update(
+            {
+                "count_experiments": len(rows),
+                "mean_frame_precision": _mean_wide_metric(rows, "frame_precision"),
+                "mean_frame_recall": _mean_wide_metric(rows, "frame_recall"),
+                "mean_frame_specificity": _mean_wide_metric(rows, "frame_specificity"),
+                "mean_frame_f1": _mean_wide_metric(rows, "frame_f1"),
+                "mean_frame_balanced_accuracy": _mean_wide_metric(rows, "frame_balanced_accuracy"),
+                "max_frame_f1": _max_wide_metric(rows, "frame_f1"),
+                "max_frame_balanced_accuracy": _max_wide_metric(rows, "frame_balanced_accuracy"),
+                "mean_multiview_side_f1": _mean_wide_metric(rows, "multiview_side_f1"),
+                "max_multiview_side_f1": _max_wide_metric(rows, "multiview_side_f1"),
+                "best_frame_config": _config_label(best_frame),
+                "best_downstream_config": _config_label(best_downstream),
+            }
+        )
+        effect_rows.append(effect_row)
+    return effect_rows
+
+
+def _stage_progression_rows(wide_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for wide_row in wide_rows:
+        temporal_prefix = "temporal_final" if _numeric(wide_row.get("temporal_final_f1")) is not None else "temporal_frame_any"
+        progression = {
+            **{column: wide_row.get(column) for column in IDENTITY_COLUMNS},
+            "frame_min_degree": wide_row.get("frame_min_degree"),
+            "box_margin_px": wide_row.get("box_margin_px"),
+            "video_prediction_source": "temporal_final" if temporal_prefix == "temporal_final" else "frame_any",
+            "multiview_min_score": wide_row.get("multiview_min_score"),
+            "frame_f1": wide_row.get("frame_f1"),
+            "temporal_f1": wide_row.get(f"{temporal_prefix}_f1"),
+            "multiview_side_f1": wide_row.get("multiview_side_f1"),
+        }
+        for metric in ("precision", "recall", "specificity", "balanced_accuracy"):
+            frame_value = _numeric(wide_row.get(f"frame_{metric}"))
+            temporal_value = _numeric(wide_row.get(f"{temporal_prefix}_{metric}"))
+            multiview_value = _numeric(wide_row.get(f"multiview_side_{metric}"))
+            progression[f"frame_{metric}"] = frame_value
+            progression[f"temporal_{metric}"] = temporal_value
+            progression[f"multiview_side_{metric}"] = multiview_value
+            progression[f"delta_frame_to_temporal_{metric}"] = _delta(frame_value, temporal_value)
+            progression[f"delta_temporal_to_multiview_{metric}"] = _delta(temporal_value, multiview_value)
+            progression[f"delta_frame_to_multiview_{metric}"] = _delta(frame_value, multiview_value)
+        progression["delta_frame_to_temporal_f1"] = _delta(_numeric(progression["frame_f1"]), _numeric(progression["temporal_f1"]))
+        progression["delta_temporal_to_multiview_f1"] = _delta(_numeric(progression["temporal_f1"]), _numeric(progression["multiview_side_f1"]))
+        progression["delta_frame_to_multiview_f1"] = _delta(_numeric(progression["frame_f1"]), _numeric(progression["multiview_side_f1"]))
+        rows.append(progression)
+    return rows
+
+
+def _group_sweep_rows(rows: list[dict[str, Any]]) -> dict[tuple[Any, ...], list[dict[str, Any]]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_sweep_group_key(row), []).append(row)
+    return grouped
+
+
+def _sweep_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(row.get(column) for column in [*IDENTITY_COLUMNS, "frame_min_degree", "box_margin_px", "multiview_min_score"])
+
+
+def _wide_group_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(row.get(column) for column in [*IDENTITY_COLUMNS, "frame_min_degree", "box_margin_px", "multiview_min_score"])
+
+
+def _preferred_source_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    for row in rows:
+        if row.get("video_prediction_source") == "temporal_final":
+            return row
+    return rows[0]
+
+
+def _long_ranking_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, int, int]:
+    return _long_ranking_key_for_metric(row, "f1")
+
+
+def _long_ranking_key_for_metric(row: dict[str, Any], metric: str) -> tuple[float, float, float, float, float, int, int]:
+    primary = _numeric(row.get(metric))
+    return (
+        -_rank_number(primary),
+        -_rank_number(_numeric(row.get("balanced_accuracy"))),
+        -_rank_number(_numeric(row.get("recall"))),
+        -_rank_number(_numeric(row.get("precision"))),
+        -_rank_number(_numeric(row.get("specificity"))),
+        _rank_count(row.get("FP")),
+        _rank_count(row.get("FN")),
+    )
+
+
+def _overall_ranking_key(row: dict[str, Any]) -> tuple[float, float, float, float, float, int, int]:
+    stage = "multiview_side" if _numeric(row.get("multiview_side_f1")) is not None else "multiview_patient"
+    return _wide_stage_ranking_key(row, stage)
+
+
+def _wide_stage_ranking_key(row: dict[str, Any], stage: str) -> tuple[float, float, float, float, float, int, int]:
+    return (
+        -_rank_number(_numeric(row.get(f"{stage}_f1"))),
+        -_rank_number(_numeric(row.get(f"{stage}_balanced_accuracy"))),
+        -_rank_number(_numeric(row.get(f"{stage}_recall"))),
+        -_rank_number(_numeric(row.get(f"{stage}_precision"))),
+        -_rank_number(_numeric(row.get(f"{stage}_specificity"))),
+        _rank_count(row.get(f"{stage}_FP")),
+        _rank_count(row.get(f"{stage}_FN")),
+    )
+
+
+def _config_label(row: dict[str, Any]) -> str:
+    parts = [
+        f"frame_variant={row.get('frame_variant')}",
+        f"temporal_variant={row.get('temporal_variant')}",
+        f"frame_min_degree={row.get('frame_min_degree')}",
+        f"box_margin_px={row.get('box_margin_px')}",
+    ]
+    if row.get("multiview_min_score") not in (None, ""):
+        parts.append(f"multiview_min_score={row.get('multiview_min_score')}")
+    return "; ".join(parts)
+
+
+def _mean_metric(rows: list[dict[str, Any]], metric: str) -> float | None:
+    return _mean([_numeric(row.get(metric)) for row in rows])
+
+
+def _max_metric(rows: list[dict[str, Any]], metric: str) -> float | None:
+    values = [_numeric(row.get(metric)) for row in rows]
+    valid = [value for value in values if value is not None]
+    return max(valid) if valid else None
+
+
+def _mean_wide_metric(rows: list[dict[str, Any]], metric: str) -> float | None:
+    return _mean([_numeric(row.get(metric)) for row in rows])
+
+
+def _max_wide_metric(rows: list[dict[str, Any]], metric: str) -> float | None:
+    valid = [value for value in (_numeric(row.get(metric)) for row in rows) if value is not None]
+    return max(valid) if valid else None
+
+
+def _mean(values: Iterable[float | None]) -> float | None:
+    valid = [value for value in values if value is not None]
+    return None if not valid else sum(valid) / len(valid)
+
+
+def _numeric(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_number(value: float | None) -> float:
+    return float("-inf") if value is None else value
+
+
+def _rank_count(value: Any) -> int:
+    number = _numeric(value)
+    return 10**12 if number is None else int(number)
+
+
+def _count_or_none(value: float | None) -> int | None:
+    return None if value is None else int(value)
+
+
+def _sum_optional(first: float | None, second: float | None) -> float | None:
+    if first is None or second is None:
+        return None
+    return first + second
+
+
+def _delta(before: float | None, after: float | None) -> float | None:
+    if before is None or after is None:
+        return None
+    return after - before
+
+
+def _wide_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    fields = [*IDENTITY_COLUMNS, "frame_min_degree", "box_margin_px", "video_prediction_source", "multiview_min_score"]
+    for stage, _metric_prefix in STAGE_PREFIXES:
+        for metric in LONG_METRIC_COLUMNS:
+            fields.append(f"{stage}_{metric}")
+    return _fields_with_extras(fields, rows)
+
+
+def _best_by_stage_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    return _fields_with_extras(["rank", *LONG_CSV_FIELDS], rows)
+
+
+def _best_overall_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    return _fields_with_extras(["rank", "overall_rank_metric_stage", *_wide_fieldnames(rows)], rows)
+
+
+def _effect_fieldnames(rows: list[dict[str, Any]], group_columns: list[str]) -> list[str]:
+    fields = [
+        "group_by",
+        *group_columns,
+        "stage",
+        "count_experiments",
+        "mean_precision",
+        "mean_recall",
+        "mean_specificity",
+        "mean_f1",
+        "mean_balanced_accuracy",
+        "max_f1",
+        "max_balanced_accuracy",
+        "mean_TP",
+        "mean_FP",
+        "mean_TN",
+        "mean_FN",
+        "best_config",
+        "best_balanced_accuracy_config",
+    ]
+    return _fields_with_extras(fields, rows)
+
+
+def _frame_effect_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    fields = [
+        *FRAME_PARAMETER_COLUMNS,
+        "count_experiments",
+        "mean_frame_precision",
+        "mean_frame_recall",
+        "mean_frame_specificity",
+        "mean_frame_f1",
+        "mean_frame_balanced_accuracy",
+        "max_frame_f1",
+        "max_frame_balanced_accuracy",
+        "mean_multiview_side_f1",
+        "max_multiview_side_f1",
+        "best_frame_config",
+        "best_downstream_config",
+    ]
+    return _fields_with_extras(fields, rows)
+
+
+def _stage_progression_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
+    fields = [
+        *IDENTITY_COLUMNS,
+        "frame_min_degree",
+        "box_margin_px",
+        "video_prediction_source",
+        "multiview_min_score",
+        "frame_f1",
+        "temporal_f1",
+        "multiview_side_f1",
+    ]
+    for metric in ("precision", "recall", "specificity", "balanced_accuracy"):
+        fields.extend(
+            [
+                f"frame_{metric}",
+                f"temporal_{metric}",
+                f"multiview_side_{metric}",
+                f"delta_frame_to_temporal_{metric}",
+                f"delta_temporal_to_multiview_{metric}",
+                f"delta_frame_to_multiview_{metric}",
+            ]
+        )
+    fields.extend(["delta_frame_to_temporal_f1", "delta_temporal_to_multiview_f1", "delta_frame_to_multiview_f1"])
+    return _fields_with_extras(fields, rows)
+
+
+def _fields_with_extras(fields: list[str], rows: list[dict[str, Any]]) -> list[str]:
+    resolved = list(dict.fromkeys(fields))
+    for row in rows:
+        for field in row:
+            if field not in resolved:
+                resolved.append(field)
+    return resolved
 
 
 def _binary_metric_columns(
@@ -1124,6 +2308,7 @@ def _build_sweep_summary(
     box_margins_px: list[float],
     video_prediction_sources: list[str],
     multiview_min_scores: list[float | None],
+    experiments: list[_ExperimentVariant],
     multiview_row_paths: dict[str, Path],
     workers: int,
     evaluate_matched_frames_only: bool,
@@ -1145,6 +2330,9 @@ def _build_sweep_summary(
             "box_margins_px": box_margins_px,
             "video_prediction_sources": video_prediction_sources,
             "multiview_min_scores": multiview_min_scores,
+            "frame_variants": sorted({experiment.frame_variant for experiment in experiments}),
+            "temporal_variants": sorted({experiment.temporal_variant for experiment in experiments}),
+            "multiview_variants": sorted({experiment.multiview_variant for experiment in experiments if experiment.multiview_variant}),
             "workers": workers,
             "evaluate_matched_frames_only": evaluate_matched_frames_only,
             "multiview_prediction_rule": (
@@ -1154,6 +2342,8 @@ def _build_sweep_summary(
             "multiview_row_paths": {key: str(path) for key, path in sorted(multiview_row_paths.items())},
         },
         "evaluated_sweep_combinations": len(rows),
+        "valid_experiment_combinations": len(experiments),
+        "valid_full_experiment_combinations": sum(1 for experiment in experiments if experiment.multiview_result_paths),
         "multiview_evaluated": multiview_results_root is not None,
         "best_operating_points": {
             "best_frame_F1": best_frame_f1,

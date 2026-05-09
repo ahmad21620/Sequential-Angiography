@@ -214,6 +214,140 @@ class CadicaThresholdSweepTests(unittest.TestCase):
                 1,
             )
 
+    def test_variant_aware_outputs_do_not_collapse_frame_or_temporal_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            temporal_results_root = temp_root / "temporal_results"
+            output_root = temp_root / "sweep"
+            frame_variant_good = (
+                "radius_outside_fraction_threshold_0p1"
+                "__radius_min_outside_samples_2"
+                "__stenosis_threshold_0p35"
+                "__average_radius_threshold_3"
+            )
+            frame_variant_bad = (
+                "radius_outside_fraction_threshold_0p2"
+                "__radius_min_outside_samples_2"
+                "__stenosis_threshold_0p35"
+                "__average_radius_threshold_3"
+            )
+            temporal_variant_2 = "min_supporting_frames_2__min_persistence_ratio_0p2"
+            temporal_variant_3 = "min_supporting_frames_3__min_persistence_ratio_0p2"
+
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        1,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/1.txt"}],
+                    ),
+                    self._manifest_row("p1", "v2", 1, "nonlesion", "negative", []),
+                ],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant_good / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[{"x": 15, "y": 15, "degree": 0.7, "severity": "moderate"}],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant_good / "p1" / "v2" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v2",
+                frame_id=1,
+                points=[],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant_bad / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant_bad / "p1" / "v2" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v2",
+                frame_id=1,
+                points=[{"x": 100, "y": 100, "degree": 0.7, "severity": "moderate"}],
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant_good / temporal_variant_2 / "p1" / "v1" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v1",
+                positive=True,
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant_good / temporal_variant_2 / "p1" / "v2" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v2",
+                positive=False,
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant_good / temporal_variant_3 / "p1" / "v1" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v1",
+                positive=True,
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant_good / temporal_variant_3 / "p1" / "v2" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v2",
+                positive=True,
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant_bad / temporal_variant_2 / "p1" / "v1" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v1",
+                positive=False,
+            )
+
+            run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                output_root=output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+                video_prediction_sources=["frame_any", "temporal_final"],
+            )
+
+            long_rows = self._read_csv(output_root / "cadica_experiment_metrics_long.csv")
+            wide_rows = self._read_csv(output_root / "cadica_experiment_metrics_wide.csv")
+            progression_rows = self._read_csv(output_root / "stage_progression.csv")
+
+            self.assertIn("frame_variant", long_rows[0])
+            self.assertIn("temporal_variant", long_rows[0])
+            self.assertIn("min_supporting_frames", long_rows[0])
+            self.assertIn("min_persistence_ratio", long_rows[0])
+            self.assertEqual(
+                {row["frame_variant"] for row in long_rows if row["stage"] == "frame"},
+                {frame_variant_good, frame_variant_bad},
+            )
+            self.assertEqual(
+                {row["min_supporting_frames"] for row in long_rows if row["stage"] == "temporal_final"},
+                {"2", "3"},
+            )
+            self.assertEqual(len(wide_rows), 3)
+
+            rows_by_variant = {
+                (row["frame_variant"], row["temporal_variant"]): row
+                for row in progression_rows
+            }
+            good_variant_2 = rows_by_variant[(frame_variant_good, temporal_variant_2)]
+            good_variant_3 = rows_by_variant[(frame_variant_good, temporal_variant_3)]
+            bad_variant_2 = rows_by_variant[(frame_variant_bad, temporal_variant_2)]
+            self.assertAlmostEqual(float(good_variant_2["delta_frame_to_temporal_f1"]), 0.0)
+            self.assertLess(float(good_variant_3["delta_frame_to_temporal_f1"]), 0.0)
+            self.assertNotEqual(good_variant_2["frame_f1"], bad_variant_2["frame_f1"])
+
     def test_evaluate_matched_frames_only_skips_unprocessed_manifest_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -672,14 +806,20 @@ class CadicaThresholdSweepTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def _write_temporal_result(self, path: Path) -> None:
-        payload = {
-            "view_id": "p1/v1",
-            "final_lesion": {
+    def _write_temporal_result(
+        self,
+        path: Path,
+        *,
+        patient_id: str = "p1",
+        video_id: str = "v1",
+        positive: bool = True,
+    ) -> None:
+        payload = {"view_id": f"{patient_id}/{video_id}"}
+        if positive:
+            payload["final_lesion"] = {
                 "severity": "moderate",
                 "degrees": {"median": 0.7, "max": 0.8},
-            },
-        }
+            }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 

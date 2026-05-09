@@ -72,6 +72,27 @@ class CadicaReportTests(unittest.TestCase):
             self.assertIn("Multi-view metrics were not found", artifacts.warnings[0])
             self.assertFalse((output_root / "tables" / "selected_multiview_patient_rows.csv").exists())
 
+    def test_report_generation_from_variant_aware_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            benchmark_root = root / "cadica_benchmark"
+            output_root = root / "variant_report"
+            self._write_variant_aware_outputs(benchmark_root)
+
+            artifacts = run_cadica_report(
+                benchmark_root=benchmark_root,
+                output_root=output_root,
+                top_k=2,
+            )
+
+            report_text = artifacts.reports["markdown"].read_text(encoding="utf-8")
+            summary = json.loads(artifacts.reports["summary_json"].read_text(encoding="utf-8"))
+            self.assertIn("CADICA Variant-Aware Benchmark Report", report_text)
+            self.assertIn("Effect of min_supporting_frames", report_text)
+            self.assertTrue((output_root / "tables" / "cadica_experiment_metrics_long.csv").is_file())
+            self.assertEqual(summary["overview"]["frame_variants"], 1)
+            self.assertEqual(summary["best_overall_configuration"]["min_supporting_frames"], "2")
+
     def test_report_requires_threshold_sweep_csv(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             benchmark_root = Path(temp_dir) / "cadica_benchmark"
@@ -157,6 +178,111 @@ class CadicaReportTests(unittest.TestCase):
                 ],
             )
 
+    def _write_variant_aware_outputs(self, benchmark_root: Path) -> None:
+        benchmark_root.mkdir(parents=True, exist_ok=True)
+        identity = {
+            "frame_variant": "radius_outside_fraction_threshold_0p1__radius_min_outside_samples_2__stenosis_threshold_0p35__average_radius_threshold_3",
+            "temporal_variant": "min_supporting_frames_2__min_persistence_ratio_0p2",
+            "multiview_variant": "flat",
+            "radius_outside_fraction_threshold": "0.1",
+            "radius_min_outside_samples": "2",
+            "stenosis_threshold": "0.35",
+            "average_radius_threshold": "3",
+            "min_supporting_frames": "2",
+            "min_persistence_ratio": "0.2",
+            "frame_min_degree": "0.5",
+            "box_margin_px": "0",
+            "video_prediction_source": "temporal_final",
+            "multiview_min_score": "0.5",
+        }
+        long_rows = [
+            {**identity, "stage": "frame", **self._long_metrics(1, 0, 1, 0)},
+            {**identity, "stage": "temporal_final", **self._long_metrics(1, 0, 1, 0)},
+            {**identity, "stage": "patient", **self._long_metrics(1, 0, 0, 0)},
+            {**identity, "stage": "multiview_side", **self._long_metrics(1, 0, 1, 0)},
+        ]
+        self._write_csv(benchmark_root / "cadica_experiment_metrics_long.csv", long_rows)
+        wide_row = {
+            **identity,
+            "frame_f1": "1.0",
+            "frame_precision": "1.0",
+            "frame_recall": "1.0",
+            "frame_specificity": "1.0",
+            "frame_balanced_accuracy": "1.0",
+            "temporal_final_f1": "1.0",
+            "temporal_final_precision": "1.0",
+            "temporal_final_recall": "1.0",
+            "temporal_final_specificity": "1.0",
+            "temporal_final_balanced_accuracy": "1.0",
+            "multiview_side_f1": "1.0",
+            "multiview_side_precision": "1.0",
+            "multiview_side_recall": "1.0",
+            "multiview_side_specificity": "1.0",
+            "multiview_side_balanced_accuracy": "1.0",
+            "multiview_side_FP": "0",
+            "multiview_side_FN": "0",
+        }
+        self._write_csv(benchmark_root / "cadica_experiment_metrics_wide.csv", [wide_row])
+        self._write_csv(benchmark_root / "best_overall_experiments.csv", [{"rank": "1", "overall_rank_metric_stage": "multiview_side", **wide_row}])
+        self._write_csv(
+            benchmark_root / "temporal_parameter_effects.csv",
+            [
+                {
+                    "min_supporting_frames": "2",
+                    "min_persistence_ratio": "0.2",
+                    "count_experiments": "1",
+                    "mean_precision": "1.0",
+                    "mean_recall": "1.0",
+                    "mean_specificity": "1.0",
+                    "mean_f1": "1.0",
+                    "mean_balanced_accuracy": "1.0",
+                    "max_f1": "1.0",
+                    "max_balanced_accuracy": "1.0",
+                }
+            ],
+        )
+        self._write_csv(
+            benchmark_root / "frame_parameter_effects.csv",
+            [
+                {
+                    "radius_outside_fraction_threshold": "0.1",
+                    "radius_min_outside_samples": "2",
+                    "stenosis_threshold": "0.35",
+                    "average_radius_threshold": "3",
+                    "mean_frame_f1": "1.0",
+                    "max_frame_f1": "1.0",
+                    "mean_multiview_side_f1": "1.0",
+                    "max_multiview_side_f1": "1.0",
+                }
+            ],
+        )
+        self._write_csv(
+            benchmark_root / "stage_progression.csv",
+            [
+                {
+                    **identity,
+                    "frame_f1": "1.0",
+                    "temporal_f1": "1.0",
+                    "multiview_side_f1": "1.0",
+                    "delta_frame_to_temporal_f1": "0.0",
+                    "delta_temporal_to_multiview_f1": "0.0",
+                    "delta_frame_to_multiview_f1": "0.0",
+                }
+            ],
+        )
+        diagnostics = {
+            "variant_counts": {
+                "frame_variants_found": 1,
+                "temporal_variants_found": 1,
+                "multiview_variants_found": 1,
+                "valid_experiment_combinations": 1,
+                "valid_full_experiment_combinations": 1,
+            },
+            "manifest_matching": {"evaluate_matched_frames_only": True},
+            "warnings": {"items": []},
+        }
+        (benchmark_root / "cadica_benchmark_diagnostics.json").write_text(json.dumps(diagnostics), encoding="utf-8")
+
     def _sweep_row(
         self,
         *,
@@ -240,6 +366,23 @@ class CadicaReportTests(unittest.TestCase):
             "balanced_accuracy": (recall + specificity) / 2,
             "false_positive_rate": 1 - specificity,
             "false_negative_rate": 1 - recall,
+        }
+
+    def _long_metrics(self, tp: int, fp: int, tn: int, fn: int) -> dict[str, object]:
+        metrics = self._metrics(tp, fp, tn, fn)
+        return {
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "specificity": metrics["specificity"],
+            "f1": metrics["F1"],
+            "balanced_accuracy": metrics["balanced_accuracy"],
+            "TP": tp,
+            "FP": fp,
+            "TN": tn,
+            "FN": fn,
+            "total_evaluated": tp + fp + tn + fn,
+            "positive_count": tp + fn,
+            "negative_count": tn + fp,
         }
 
     def _write_csv(self, path: Path, rows: list[dict[str, object]]) -> None:

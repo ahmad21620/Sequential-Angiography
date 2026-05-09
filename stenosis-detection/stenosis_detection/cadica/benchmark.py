@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 FRAME_RESULT_SUFFIX = "_stenosis_results.json"
@@ -589,6 +589,7 @@ def _build_video_rows(
     *,
     temporal_results_root: Path | None,
     video_prediction_source: str,
+    temporal_predictions: Mapping[tuple[str, str], tuple[bool | None, float | None]] | None = None,
 ) -> list[dict[str, Any]]:
     rows_by_video: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for frame_row in frame_rows:
@@ -600,7 +601,10 @@ def _build_video_rows(
         label_target = _video_label_target(video_label)
         frame_predicted_positive = any(bool(row["predicted_positive"]) for row in rows)
         frame_score = max((_optional_float(row.get("score")) or 0.0 for row in rows), default=0.0)
-        temporal_present, temporal_score = _load_temporal_prediction(temporal_results_root, patient_id, video_id)
+        if temporal_predictions is None:
+            temporal_present, temporal_score = _load_temporal_prediction(temporal_results_root, patient_id, video_id)
+        else:
+            temporal_present, temporal_score = temporal_predictions.get((patient_id.lower(), video_id.lower()), (False, 0.0))
         if video_prediction_source == "temporal_final":
             predicted_positive = bool(temporal_present)
             score = temporal_score
@@ -617,7 +621,9 @@ def _build_video_rows(
                 "score": score,
                 "positive_frame_count": sum(1 for row in rows if row["frame_label"] == "positive"),
                 "predicted_positive_frame_count": sum(1 for row in rows if bool(row["predicted_positive"])),
-                "temporal_final_lesion_present": temporal_present if temporal_results_root is not None else None,
+                "temporal_final_lesion_present": (
+                    temporal_present if temporal_results_root is not None or temporal_predictions is not None else None
+                ),
                 "outcome": outcome,
             }
         )
@@ -651,11 +657,16 @@ def _build_multiview_rows(
     *,
     multiview_results_root: Path | None,
     multiview_min_score: float,
+    multiview_predictions: Mapping[str, MultiViewPrediction] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
-    if multiview_results_root is None:
+    if multiview_results_root is None and multiview_predictions is None:
         return [], [], None
 
-    predictions = _index_multiview_predictions(multiview_results_root, multiview_min_score=multiview_min_score)
+    predictions = (
+        dict(multiview_predictions)
+        if multiview_predictions is not None
+        else _index_multiview_predictions(multiview_results_root, multiview_min_score=multiview_min_score)
+    )
     patient_label_rows = _multiview_patient_label_rows(manifest_frames)
     patient_rows = [
         _multiview_patient_row(label_row, predictions.get(label_row["patient_id"]))
