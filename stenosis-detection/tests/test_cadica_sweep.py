@@ -141,6 +141,79 @@ class CadicaThresholdSweepTests(unittest.TestCase):
                     video_prediction_sources=["temporal_final"],
                 )
 
+    def test_threshold_sweep_writes_frame_temporal_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            temporal_results_root = temp_root / "temporal_results"
+            output_root = temp_root / "sweep"
+            frame_variant = (
+                "radius_outside_fraction_threshold_0p1"
+                "__radius_min_outside_samples_2"
+                "__stenosis_threshold_0p35"
+                "__average_radius_threshold_3"
+            )
+            temporal_variant = "min_supporting_frames_2__min_persistence_ratio_0p2"
+
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        1,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/1.txt"}],
+                    )
+                ],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[],
+            )
+            self._write_temporal_result(
+                temporal_results_root
+                / frame_variant
+                / temporal_variant
+                / "p1"
+                / "v1"
+                / "view_temporal_fusion.json"
+            )
+
+            outputs = run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                output_root=output_root,
+                frame_min_degrees=[0.0, 0.5],
+                box_margins_px=[0.0],
+                video_prediction_sources=["frame_any", "temporal_final"],
+            )
+
+            diagnostics = json.loads(outputs["cadica_benchmark_diagnostics_json"].read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["frame_results"]["json_file_count"], 1)
+            self.assertEqual(diagnostics["frame_results"]["jsons_with_nonempty_stenosis_points"], 0)
+            self.assertEqual(diagnostics["manifest_matching"]["matched_manifest_frames"], 1)
+            self.assertEqual(
+                diagnostics["manifest_matching"]["matched_manifest_frames_with_thresholded_points_by_frame_min_degree"],
+                {"0": 0, "0.5": 0},
+            )
+            self.assertEqual(diagnostics["temporal_results"]["json_file_count"], 1)
+            self.assertEqual(diagnostics["temporal_results"]["temporal_final_positive_count"], 1)
+            self.assertEqual(
+                diagnostics["temporal_results"]["positive_temporal_with_any_matched_frame_stenosis_points"],
+                0,
+            )
+            self.assertEqual(
+                len(diagnostics["temporal_results"]["positive_temporal_without_underlying_positive_frame_examples"]),
+                1,
+            )
+
     def test_workers_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -515,6 +588,17 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             "split_by_coronary_side": True,
             "side_results": side_results,
             "skipped_sides": [side for side in ("left", "right") if side not in side_results],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_temporal_result(self, path: Path) -> None:
+        payload = {
+            "view_id": "p1/v1",
+            "final_lesion": {
+                "severity": "moderate",
+                "degrees": {"median": 0.7, "max": 0.8},
+            },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 import csv
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import itertools
 import json
 from pathlib import Path
@@ -31,16 +32,24 @@ except ImportError:  # pragma: no cover - exercised only when tqdm is absent.
 
 from .benchmark import (
     CADICA_SUPERVISED_NOTE,
+    CADICA_PATIENT_ID_RE,
+    CADICA_VIDEO_ID_RE,
+    FRAME_RESULT_SUFFIX,
     MULTIVIEW_PATIENT_ROW_FIELDS,
     MULTIVIEW_SIDE_ROW_FIELDS,
+    TEMPORAL_RESULT_FILENAME,
     VIDEO_PREDICTION_SOURCES,
     _build_patient_rows,
     _build_summary,
     _build_video_rows,
     _build_multiview_rows,
+    _cadica_patient_video_from_parts,
     _csv_value,
     _evaluate_frames,
     _index_frame_predictions,
+    _lookup_frame_prediction,
+    _read_json_object,
+    _threshold_points,
     _validate_inputs,
     load_cadica_manifest,
 )
@@ -177,6 +186,13 @@ def run_cadica_threshold_sweep(
 
     manifest_frames = load_cadica_manifest(resolved_manifest)
     frame_predictions = _index_frame_predictions(resolved_frame_root)
+    diagnostics = _build_cadica_sweep_diagnostics(
+        manifest_frames=manifest_frames,
+        frame_predictions=frame_predictions,
+        frame_results_root=resolved_frame_root,
+        temporal_results_root=resolved_temporal_root,
+        frame_min_degrees=resolved_frame_min_degrees,
+    )
 
     jobs = _build_sweep_jobs(
         frame_min_degrees=resolved_frame_min_degrees,
@@ -198,9 +214,11 @@ def run_cadica_threshold_sweep(
 
     csv_path = resolved_output_root / "cadica_threshold_sweep.csv"
     summary_path = resolved_output_root / "cadica_threshold_sweep_summary.json"
+    diagnostics_path = resolved_output_root / "cadica_benchmark_diagnostics.json"
     multiview_patient_rows_path = resolved_output_root / "cadica_multiview_patient_rows.csv"
     multiview_side_rows_path = resolved_output_root / "cadica_multiview_side_rows.csv"
     _write_csv(csv_path, sweep_rows, fieldnames=SWEEP_CSV_FIELDS)
+    _write_json(diagnostics_path, diagnostics)
     multiview_row_paths = _write_multiview_review_rows(
         multiview_patient_rows_path=multiview_patient_rows_path,
         multiview_side_rows_path=multiview_side_rows_path,
@@ -228,6 +246,7 @@ def run_cadica_threshold_sweep(
     outputs = {
         "cadica_threshold_sweep_csv": csv_path,
         "cadica_threshold_sweep_summary_json": summary_path,
+        "cadica_benchmark_diagnostics_json": diagnostics_path,
     }
     outputs.update(multiview_row_paths)
     return outputs
@@ -509,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"CADICA threshold sweep CSV: {outputs['cadica_threshold_sweep_csv']}")
     print(f"CADICA threshold sweep summary: {outputs['cadica_threshold_sweep_summary_json']}")
+    print(f"CADICA benchmark diagnostics: {outputs['cadica_benchmark_diagnostics_json']}")
     return 0
 
 
@@ -572,6 +592,369 @@ def _first_multiview_row_score(multiview_min_scores: list[float | None]) -> floa
         if score is not None:
             return score
     return 0.0
+
+
+def _build_cadica_sweep_diagnostics(
+    *,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+    frame_results_root: Path,
+    temporal_results_root: Path | None,
+    frame_min_degrees: list[float],
+) -> dict[str, Any]:
+    frame_paths = sorted(path for path in frame_results_root.rglob(f"*{FRAME_RESULT_SUFFIX}") if path.is_file())
+    temporal_paths = (
+        []
+        if temporal_results_root is None
+        else sorted(path for path in temporal_results_root.rglob(TEMPORAL_RESULT_FILENAME) if path.is_file())
+    )
+    frame_sources = _unique_frame_prediction_sources(frame_predictions)
+    frame_json_summary = _summarize_frame_jsons(frame_paths, frame_results_root)
+    manifest_summary = _summarize_manifest_matches(
+        manifest_frames=manifest_frames,
+        frame_predictions=frame_predictions,
+        frame_min_degrees=frame_min_degrees,
+    )
+    temporal_summary = _summarize_temporal_results(
+        temporal_paths=temporal_paths,
+        temporal_results_root=temporal_results_root,
+        manifest_frames=manifest_frames,
+        frame_predictions=frame_predictions,
+        frame_min_degrees=frame_min_degrees,
+    )
+    return {
+        "frame_results": {
+            **frame_json_summary,
+            "indexed_prediction_key_count": len(frame_predictions),
+            "unique_indexed_prediction_file_count": len(frame_sources),
+            "created_key_examples": _frame_key_examples(frame_predictions, frame_results_root),
+        },
+        "manifest_matching": manifest_summary,
+        "temporal_results": temporal_summary,
+        "staleness_and_root_hints": _summarize_staleness_and_roots(
+            frame_paths=frame_paths,
+            temporal_paths=temporal_paths,
+            frame_results_root=frame_results_root,
+            temporal_results_root=temporal_results_root,
+        ),
+    }
+
+
+def _summarize_frame_jsons(frame_paths: list[Path], frame_results_root: Path) -> dict[str, Any]:
+    nonempty_raw = 0
+    parsed_point_files = 0
+    examples: list[dict[str, Any]] = []
+    for result_path in frame_paths:
+        payload = _read_json_object(result_path)
+        raw_points = payload.get("stenosis_points")
+        raw_count = len(raw_points) if isinstance(raw_points, list) else 0
+        parsed_count = sum(1 for item in raw_points if isinstance(item, dict)) if isinstance(raw_points, list) else 0
+        if raw_count > 0:
+            nonempty_raw += 1
+        if parsed_count > 0:
+            parsed_point_files += 1
+        if len(examples) < 10:
+            frame_payload = payload.get("frame") if isinstance(payload.get("frame"), dict) else {}
+            examples.append(
+                {
+                    "relative_path": _display_relative_path(result_path, frame_results_root),
+                    "image_name": frame_payload.get("image_name"),
+                    "view_id": frame_payload.get("view_id"),
+                    "stenosis_point_count": raw_count,
+                    "max_degree": _max_raw_degree(raw_points),
+                }
+            )
+    return {
+        "json_file_count": len(frame_paths),
+        "jsons_with_nonempty_stenosis_points": nonempty_raw,
+        "jsons_with_dict_stenosis_points": parsed_point_files,
+        "frame_json_examples": examples,
+    }
+
+
+def _summarize_manifest_matches(
+    *,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+    frame_min_degrees: list[float],
+) -> dict[str, Any]:
+    matched_count = 0
+    matched_with_points = 0
+    threshold_counts = {_threshold_key(value): 0 for value in frame_min_degrees}
+    unmatched_examples: list[dict[str, Any]] = []
+
+    for manifest_frame in manifest_frames:
+        prediction = _lookup_frame_prediction(manifest_frame, frame_predictions)
+        if prediction is None:
+            if len(unmatched_examples) < 10:
+                unmatched_examples.append(
+                    {
+                        "patient_id": manifest_frame.patient_id,
+                        "video_id": manifest_frame.video_id,
+                        "frame_id": manifest_frame.frame_id,
+                        "prepared_image_name": manifest_frame.prepared_image_name,
+                        "prepared_image_stem": manifest_frame.prepared_image_stem,
+                    }
+                )
+            continue
+
+        matched_count += 1
+        if prediction.points:
+            matched_with_points += 1
+        for threshold in frame_min_degrees:
+            if _threshold_points(prediction.points, threshold):
+                threshold_counts[_threshold_key(threshold)] += 1
+
+    return {
+        "manifest_frame_count": len(manifest_frames),
+        "positive_manifest_frame_count": sum(1 for frame in manifest_frames if frame.frame_label == "positive"),
+        "matched_manifest_frames": matched_count,
+        "unmatched_manifest_frames": len(manifest_frames) - matched_count,
+        "matched_manifest_frames_with_stenosis_points": matched_with_points,
+        "matched_manifest_frames_with_thresholded_points_by_frame_min_degree": threshold_counts,
+        "unmatched_manifest_frame_examples": unmatched_examples,
+    }
+
+
+def _summarize_temporal_results(
+    *,
+    temporal_paths: list[Path],
+    temporal_results_root: Path | None,
+    manifest_frames: list[Any],
+    frame_predictions: dict[Any, Any],
+    frame_min_degrees: list[float],
+) -> dict[str, Any]:
+    if temporal_results_root is None:
+        return {
+            "json_file_count": 0,
+            "indexed_patient_video_count": 0,
+            "temporal_final_positive_count": 0,
+            "note": "No temporal_results_root was supplied.",
+        }
+
+    manifest_by_video: dict[tuple[str, str], list[Any]] = {}
+    for manifest_frame in manifest_frames:
+        key = (manifest_frame.patient_id.lower(), manifest_frame.video_id.lower())
+        manifest_by_video.setdefault(key, []).append(manifest_frame)
+
+    indexed_pairs: set[tuple[str, str]] = set()
+    unindexed_examples: list[str] = []
+    positive_count = 0
+    positives_with_raw_frame_points = 0
+    positives_with_thresholded_frames = {_threshold_key(value): 0 for value in frame_min_degrees}
+    positive_examples_without_min_threshold_frame: list[dict[str, Any]] = []
+    min_threshold = min(frame_min_degrees) if frame_min_degrees else 0.0
+
+    for temporal_path in temporal_paths:
+        relative_parts = _relative_parts(temporal_path, temporal_results_root)
+        patient_video_pair = _cadica_patient_video_from_parts(relative_parts)
+        if patient_video_pair is None:
+            if len(unindexed_examples) < 10:
+                unindexed_examples.append(_display_relative_path(temporal_path, temporal_results_root))
+            continue
+
+        patient_id, video_id = patient_video_pair
+        indexed_pairs.add((patient_id.lower(), video_id.lower()))
+        payload = _read_json_object(temporal_path)
+        final_lesion = payload.get("final_lesion")
+        if not isinstance(final_lesion, dict):
+            continue
+
+        positive_count += 1
+        manifest_video_frames = manifest_by_video.get((patient_id.lower(), video_id.lower()), [])
+        has_raw_frame_points = any(
+            (prediction := _lookup_frame_prediction(frame, frame_predictions)) is not None and bool(prediction.points)
+            for frame in manifest_video_frames
+        )
+        if has_raw_frame_points:
+            positives_with_raw_frame_points += 1
+
+        has_min_threshold_frame = False
+        for threshold in frame_min_degrees:
+            has_thresholded_frame = any(
+                (prediction := _lookup_frame_prediction(frame, frame_predictions)) is not None
+                and bool(_threshold_points(prediction.points, threshold))
+                for frame in manifest_video_frames
+            )
+            if has_thresholded_frame:
+                positives_with_thresholded_frames[_threshold_key(threshold)] += 1
+            if threshold == min_threshold:
+                has_min_threshold_frame = has_thresholded_frame
+
+        if not has_min_threshold_frame and len(positive_examples_without_min_threshold_frame) < 10:
+            positive_examples_without_min_threshold_frame.append(
+                {
+                    "patient_id": patient_id,
+                    "video_id": video_id,
+                    "relative_path": _display_relative_path(temporal_path, temporal_results_root),
+                    "matched_manifest_frames_for_video": len(manifest_video_frames),
+                    "has_raw_frame_points": has_raw_frame_points,
+                    "frame_min_degree": min_threshold,
+                }
+            )
+
+    return {
+        "json_file_count": len(temporal_paths),
+        "indexed_patient_video_count": len(indexed_pairs),
+        "unindexed_temporal_json_examples": unindexed_examples,
+        "temporal_final_positive_count": positive_count,
+        "positive_temporal_with_any_matched_frame_stenosis_points": positives_with_raw_frame_points,
+        "positive_temporal_with_thresholded_frame_by_frame_min_degree": positives_with_thresholded_frames,
+        "positive_temporal_without_underlying_positive_frame_examples": positive_examples_without_min_threshold_frame,
+    }
+
+
+def _summarize_staleness_and_roots(
+    *,
+    frame_paths: list[Path],
+    temporal_paths: list[Path],
+    frame_results_root: Path,
+    temporal_results_root: Path | None,
+) -> dict[str, Any]:
+    frame_latest = _latest_mtime(frame_paths)
+    temporal_latest = _latest_mtime(temporal_paths)
+    temporal_oldest = _oldest_mtime(temporal_paths)
+    temporal_older_than_latest_frame = (
+        0 if frame_latest is None else sum(1 for path in temporal_paths if path.stat().st_mtime < frame_latest)
+    )
+    frame_prefixes = _frame_variant_prefixes(frame_paths, frame_results_root)
+    temporal_frame_prefixes = (
+        set() if temporal_results_root is None else _temporal_frame_variant_prefixes(temporal_paths, temporal_results_root)
+    )
+    missing_frame_prefixes = sorted(prefix for prefix in temporal_frame_prefixes if prefix not in frame_prefixes)
+    return {
+        "newest_frame_result_mtime": _format_mtime(frame_latest),
+        "oldest_temporal_result_mtime": _format_mtime(temporal_oldest),
+        "newest_temporal_result_mtime": _format_mtime(temporal_latest),
+        "newest_temporal_older_than_newest_frame": (
+            None if frame_latest is None or temporal_latest is None else temporal_latest < frame_latest
+        ),
+        "temporal_files_older_than_newest_frame_count": temporal_older_than_latest_frame,
+        "frame_results_root_parent": str(frame_results_root.resolve().parent),
+        "temporal_results_root_parent": None if temporal_results_root is None else str(temporal_results_root.resolve().parent),
+        "roots_share_parent": (
+            None
+            if temporal_results_root is None
+            else frame_results_root.resolve().parent == temporal_results_root.resolve().parent
+        ),
+        "frame_variant_prefix_examples": [_prefix_text(prefix) for prefix in sorted(frame_prefixes)[:10]],
+        "temporal_frame_variant_prefix_examples": [
+            _prefix_text(prefix) for prefix in sorted(temporal_frame_prefixes)[:10]
+        ],
+        "temporal_frame_prefixes_without_frame_results": [
+            _prefix_text(prefix) for prefix in missing_frame_prefixes[:10]
+        ],
+    }
+
+
+def _unique_frame_prediction_sources(frame_predictions: dict[Any, Any]) -> dict[Path, Any]:
+    sources: dict[Path, Any] = {}
+    for prediction in frame_predictions.values():
+        sources.setdefault(prediction.source_path, prediction)
+    return sources
+
+
+def _frame_key_examples(frame_predictions: dict[Any, Any], frame_results_root: Path) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for (patient_id, video_id, image_key), prediction in sorted(frame_predictions.items(), key=lambda item: item[0]):
+        if len(examples) >= 10:
+            break
+        examples.append(
+            {
+                "patient_id": patient_id,
+                "video_id": video_id,
+                "image_key": image_key,
+                "relative_path": _display_relative_path(prediction.source_path, frame_results_root),
+                "parsed_stenosis_point_count": len(prediction.points),
+            }
+        )
+    return examples
+
+
+def _max_raw_degree(raw_points: object) -> float | None:
+    if not isinstance(raw_points, list):
+        return None
+    degrees = []
+    for raw_point in raw_points:
+        if not isinstance(raw_point, dict):
+            continue
+        try:
+            degrees.append(float(raw_point.get("degree")))
+        except (TypeError, ValueError):
+            continue
+    return max(degrees) if degrees else None
+
+
+def _result_mtimes(paths: list[Path]) -> list[float]:
+    return [path.stat().st_mtime for path in paths]
+
+
+def _latest_mtime(paths: list[Path]) -> float | None:
+    mtimes = _result_mtimes(paths)
+    return max(mtimes) if mtimes else None
+
+
+def _oldest_mtime(paths: list[Path]) -> float | None:
+    mtimes = _result_mtimes(paths)
+    return min(mtimes) if mtimes else None
+
+
+def _format_mtime(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+
+
+def _relative_parts(path: Path, root: Path) -> tuple[str, ...]:
+    try:
+        return path.resolve().relative_to(root.resolve()).parts
+    except ValueError:
+        return path.parts
+
+
+def _display_relative_path(path: Path, root: Path) -> str:
+    try:
+        relative_path = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        relative_path = path
+    return relative_path.as_posix()
+
+
+def _cadica_patient_video_index(parts: tuple[str, ...]) -> int | None:
+    for index, part in enumerate(parts[:-1]):
+        if CADICA_PATIENT_ID_RE.fullmatch(part) and CADICA_VIDEO_ID_RE.fullmatch(parts[index + 1]):
+            return index
+    return None
+
+
+def _frame_variant_prefixes(paths: list[Path], root: Path) -> set[tuple[str, ...]]:
+    prefixes: set[tuple[str, ...]] = set()
+    for path in paths:
+        parts = _relative_parts(path, root)
+        patient_index = _cadica_patient_video_index(parts)
+        if patient_index is not None:
+            prefixes.add(parts[:patient_index])
+    return prefixes
+
+
+def _temporal_frame_variant_prefixes(paths: list[Path], root: Path) -> set[tuple[str, ...]]:
+    prefixes: set[tuple[str, ...]] = set()
+    for path in paths:
+        parts = _relative_parts(path, root)
+        patient_index = _cadica_patient_video_index(parts)
+        if patient_index is None:
+            continue
+        temporal_prefix = parts[:patient_index]
+        prefixes.add(temporal_prefix[:-1] if temporal_prefix else ())
+    return prefixes
+
+
+def _prefix_text(prefix: tuple[str, ...]) -> str:
+    return "/".join(prefix) if prefix else "(flat)"
+
+
+def _threshold_key(value: float) -> str:
+    return f"{value:g}"
 
 
 def _write_multiview_review_rows(
