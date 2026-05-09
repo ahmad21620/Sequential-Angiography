@@ -161,6 +161,7 @@ def run_cadica_threshold_sweep(
     video_prediction_sources: list[str] | None = None,
     multiview_min_scores: list[float] | None = None,
     workers: int = 1,
+    evaluate_matched_frames_only: bool = False,
 ) -> dict[str, Path]:
     resolved_manifest = Path(manifest)
     resolved_frame_root = Path(frame_results_root)
@@ -186,12 +187,19 @@ def run_cadica_threshold_sweep(
 
     manifest_frames = load_cadica_manifest(resolved_manifest)
     frame_predictions = _index_frame_predictions(resolved_frame_root)
+    evaluation_manifest_frames = (
+        _matched_manifest_frames(manifest_frames, frame_predictions)
+        if evaluate_matched_frames_only
+        else manifest_frames
+    )
     diagnostics = _build_cadica_sweep_diagnostics(
         manifest_frames=manifest_frames,
+        evaluation_manifest_frames=evaluation_manifest_frames,
         frame_predictions=frame_predictions,
         frame_results_root=resolved_frame_root,
         temporal_results_root=resolved_temporal_root,
         frame_min_degrees=resolved_frame_min_degrees,
+        evaluate_matched_frames_only=evaluate_matched_frames_only,
     )
 
     jobs = _build_sweep_jobs(
@@ -207,7 +215,7 @@ def run_cadica_threshold_sweep(
         output_root=resolved_output_root,
         temporal_results_root=resolved_temporal_root,
         multiview_results_root=resolved_multiview_root,
-        manifest_frames=manifest_frames,
+        manifest_frames=evaluation_manifest_frames,
         frame_predictions=frame_predictions,
         workers=resolved_workers,
     )
@@ -222,7 +230,7 @@ def run_cadica_threshold_sweep(
     multiview_row_paths = _write_multiview_review_rows(
         multiview_patient_rows_path=multiview_patient_rows_path,
         multiview_side_rows_path=multiview_side_rows_path,
-        manifest_frames=manifest_frames,
+        manifest_frames=evaluation_manifest_frames,
         multiview_results_root=resolved_multiview_root,
         multiview_min_score=_first_multiview_row_score(resolved_multiview_min_scores),
     )
@@ -241,6 +249,7 @@ def run_cadica_threshold_sweep(
             multiview_min_scores=resolved_multiview_min_scores,
             multiview_row_paths=multiview_row_paths,
             workers=resolved_workers,
+            evaluate_matched_frames_only=evaluate_matched_frames_only,
         ),
     )
     outputs = {
@@ -497,6 +506,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of worker processes used to evaluate sweep combinations. Defaults to 1.",
     )
+    parser.add_argument(
+        "--evaluate-matched-frames-only",
+        action="store_true",
+        help=(
+            "Evaluate only manifest frames that have a matching frame prediction JSON. "
+            "By default, unmatched manifest frames are preserved as no-prediction frames."
+        ),
+    )
     return parser
 
 
@@ -521,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
                 None if args.multiview_min_scores is None else parse_float_list(args.multiview_min_scores)
             ),
             workers=args.workers,
+            evaluate_matched_frames_only=args.evaluate_matched_frames_only,
         )
     except (FileNotFoundError, NotADirectoryError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"CADICA threshold sweep failed: {exc}", file=sys.stderr)
@@ -594,13 +612,23 @@ def _first_multiview_row_score(multiview_min_scores: list[float | None]) -> floa
     return 0.0
 
 
+def _matched_manifest_frames(manifest_frames: list[Any], frame_predictions: dict[Any, Any]) -> list[Any]:
+    return [
+        manifest_frame
+        for manifest_frame in manifest_frames
+        if _lookup_frame_prediction(manifest_frame, frame_predictions) is not None
+    ]
+
+
 def _build_cadica_sweep_diagnostics(
     *,
     manifest_frames: list[Any],
+    evaluation_manifest_frames: list[Any],
     frame_predictions: dict[Any, Any],
     frame_results_root: Path,
     temporal_results_root: Path | None,
     frame_min_degrees: list[float],
+    evaluate_matched_frames_only: bool,
 ) -> dict[str, Any]:
     frame_paths = sorted(path for path in frame_results_root.rglob(f"*{FRAME_RESULT_SUFFIX}") if path.is_file())
     temporal_paths = (
@@ -612,8 +640,10 @@ def _build_cadica_sweep_diagnostics(
     frame_json_summary = _summarize_frame_jsons(frame_paths, frame_results_root)
     manifest_summary = _summarize_manifest_matches(
         manifest_frames=manifest_frames,
+        evaluation_manifest_frames=evaluation_manifest_frames,
         frame_predictions=frame_predictions,
         frame_min_degrees=frame_min_degrees,
+        evaluate_matched_frames_only=evaluate_matched_frames_only,
     )
     temporal_summary = _summarize_temporal_results(
         temporal_paths=temporal_paths,
@@ -675,8 +705,10 @@ def _summarize_frame_jsons(frame_paths: list[Path], frame_results_root: Path) ->
 def _summarize_manifest_matches(
     *,
     manifest_frames: list[Any],
+    evaluation_manifest_frames: list[Any],
     frame_predictions: dict[Any, Any],
     frame_min_degrees: list[float],
+    evaluate_matched_frames_only: bool,
 ) -> dict[str, Any]:
     matched_count = 0
     matched_with_points = 0
@@ -706,10 +738,19 @@ def _summarize_manifest_matches(
                 threshold_counts[_threshold_key(threshold)] += 1
 
     return {
+        "evaluate_matched_frames_only": evaluate_matched_frames_only,
         "manifest_frame_count": len(manifest_frames),
         "positive_manifest_frame_count": sum(1 for frame in manifest_frames if frame.frame_label == "positive"),
         "matched_manifest_frames": matched_count,
         "unmatched_manifest_frames": len(manifest_frames) - matched_count,
+        "skipped_unmatched_manifest_frames": len(manifest_frames) - len(evaluation_manifest_frames),
+        "evaluated_frame_count": len(evaluation_manifest_frames),
+        "positive_evaluated_frame_count": sum(
+            1 for frame in evaluation_manifest_frames if frame.frame_label == "positive"
+        ),
+        "negative_evaluated_frame_count": sum(
+            1 for frame in evaluation_manifest_frames if frame.frame_label == "negative"
+        ),
         "matched_manifest_frames_with_stenosis_points": matched_with_points,
         "matched_manifest_frames_with_thresholded_points_by_frame_min_degree": threshold_counts,
         "unmatched_manifest_frame_examples": unmatched_examples,
@@ -1085,6 +1126,7 @@ def _build_sweep_summary(
     multiview_min_scores: list[float | None],
     multiview_row_paths: dict[str, Path],
     workers: int,
+    evaluate_matched_frames_only: bool,
 ) -> dict[str, Any]:
     best_frame_f1 = _best_metric(rows, "frame_F1")
     best_video_f1 = _best_metric(rows, "video_F1")
@@ -1104,6 +1146,7 @@ def _build_sweep_summary(
             "video_prediction_sources": video_prediction_sources,
             "multiview_min_scores": multiview_min_scores,
             "workers": workers,
+            "evaluate_matched_frames_only": evaluate_matched_frames_only,
             "multiview_prediction_rule": (
                 "predicted positive when lesion is present and score >= threshold; "
                 "if a result lacks an explicit lesion-present field, score >= threshold is used"

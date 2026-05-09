@@ -214,6 +214,86 @@ class CadicaThresholdSweepTests(unittest.TestCase):
                 1,
             )
 
+    def test_evaluate_matched_frames_only_skips_unprocessed_manifest_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            self._write_manifest_rows(
+                manifest_path,
+                [
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        1,
+                        "lesion",
+                        "positive",
+                        [{"x": 10, "y": 10, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/1.txt"}],
+                    ),
+                    self._manifest_row("p1", "v1", 2, "lesion", "negative", []),
+                    self._manifest_row(
+                        "p1",
+                        "v1",
+                        3,
+                        "lesion",
+                        "positive",
+                        [{"x": 30, "y": 30, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/3.txt"}],
+                    ),
+                ],
+            )
+            self._write_frame_result(
+                frame_results_root / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[{"x": 15, "y": 15, "degree": 0.7, "severity": "moderate"}],
+            )
+            self._write_frame_result(
+                frame_results_root / "p1" / "v1" / "slice_00002_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=2,
+                points=[],
+            )
+
+            default_output_root = temp_root / "sweep_default"
+            run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                output_root=default_output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+            )
+            default_row = self._read_csv(default_output_root / "cadica_threshold_sweep.csv")[0]
+            self.assertEqual(int(default_row["frame_total_evaluated"]), 3)
+            self.assertEqual(int(default_row["frame_TP"]), 1)
+            self.assertEqual(int(default_row["frame_TN"]), 1)
+            self.assertEqual(int(default_row["frame_FN"]), 1)
+
+            matched_only_output_root = temp_root / "sweep_matched_only"
+            outputs = run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                output_root=matched_only_output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+                evaluate_matched_frames_only=True,
+            )
+            matched_only_row = self._read_csv(matched_only_output_root / "cadica_threshold_sweep.csv")[0]
+            self.assertEqual(int(matched_only_row["frame_total_evaluated"]), 2)
+            self.assertEqual(int(matched_only_row["frame_TP"]), 1)
+            self.assertEqual(int(matched_only_row["frame_TN"]), 1)
+            self.assertEqual(int(matched_only_row["frame_FN"]), 0)
+
+            diagnostics = json.loads(outputs["cadica_benchmark_diagnostics_json"].read_text(encoding="utf-8"))
+            self.assertTrue(diagnostics["manifest_matching"]["evaluate_matched_frames_only"])
+            self.assertEqual(diagnostics["manifest_matching"]["manifest_frame_count"], 3)
+            self.assertEqual(diagnostics["manifest_matching"]["matched_manifest_frames"], 2)
+            self.assertEqual(diagnostics["manifest_matching"]["skipped_unmatched_manifest_frames"], 1)
+            self.assertEqual(diagnostics["manifest_matching"]["evaluated_frame_count"], 2)
+            self.assertEqual(diagnostics["manifest_matching"]["positive_evaluated_frame_count"], 1)
+            self.assertEqual(diagnostics["manifest_matching"]["negative_evaluated_frame_count"], 1)
+
     def test_workers_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
