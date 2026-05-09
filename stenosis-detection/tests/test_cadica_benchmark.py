@@ -15,7 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from stenosis_detection.cadica.benchmark import run_cadica_benchmark
+from stenosis_detection.cadica.benchmark import (
+    _index_frame_predictions,
+    _index_multiview_predictions,
+    _load_temporal_prediction,
+    run_cadica_benchmark,
+)
 from stenosis_detection.yolo.schema import YoloDetection, YoloDetectorMetadata, build_yolo_frame_payload
 
 
@@ -178,6 +183,53 @@ class CadicaBenchmarkTests(unittest.TestCase):
             self.assertAlmostEqual(frame_row["score"] or 0.0, 0.83)
             self.assertEqual(result.summary["frame_binary_metrics"]["TP"], 1)
             self.assertEqual(result.summary["box_detection_metrics"]["matched_gt_boxes"], 1)
+
+    def test_nested_sweep_paths_index_cadica_patient_and_video_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            frame_results_root = temp_root / "frame_results"
+            temporal_results_root = temp_root / "temporal_results"
+            multiview_results_root = temp_root / "multiview_results"
+            frame_variant = (
+                "radius_outside_fraction_threshold_0p1"
+                "__radius_min_outside_samples_2"
+                "__stenosis_threshold_0p35"
+                "__average_radius_threshold_3"
+            )
+            temporal_variant = "min_supporting_frames_2__min_persistence_ratio_0p2"
+
+            self._write_frame_result(
+                frame_results_root / frame_variant / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[{"x": 15, "y": 15, "degree": 0.70, "severity": "moderate"}],
+            )
+            self._write_temporal_result(
+                temporal_results_root
+                / frame_variant
+                / temporal_variant
+                / "p1"
+                / "v1"
+                / "view_temporal_fusion.json"
+            )
+            self._write_multiview_result(
+                multiview_results_root
+                / frame_variant
+                / temporal_variant
+                / "p1"
+                / "case_multiview_fusion.json"
+            )
+
+            frame_predictions = _index_frame_predictions(frame_results_root)
+            temporal_present, temporal_score = _load_temporal_prediction(temporal_results_root, "p1", "v1")
+            multiview_predictions = _index_multiview_predictions(multiview_results_root, multiview_min_score=0.0)
+
+            self.assertIn(("p1", "v1", "slice_00001"), frame_predictions)
+            self.assertTrue(temporal_present)
+            self.assertAlmostEqual(temporal_score or 0.0, 0.7)
+            self.assertIn("p1", multiview_predictions)
+            self.assertNotIn(frame_variant, multiview_predictions)
 
     def test_review_images_are_written_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -372,6 +424,39 @@ class CadicaBenchmarkTests(unittest.TestCase):
             image_height=512,
             detections=[detection],
         )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_temporal_result(self, path: Path) -> None:
+        payload = {
+            "view_id": "p1/v1",
+            "final_lesion": {
+                "severity": "moderate",
+                "degrees": {
+                    "median": 0.7,
+                    "max": 0.8,
+                },
+            },
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _write_multiview_result(self, path: Path) -> None:
+        payload = {
+            "case_id": "p1",
+            "final_case_lesion": {
+                "severity": "moderate",
+                "degrees": {
+                    "median": 0.7,
+                    "max": 0.8,
+                },
+                "total_score": 0.9,
+            },
+            "confidence": {
+                "score": 0.8,
+                "label": "high",
+            },
+        }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
 

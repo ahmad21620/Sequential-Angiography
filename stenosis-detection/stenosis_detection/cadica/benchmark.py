@@ -4,8 +4,10 @@ import argparse
 from collections import Counter, defaultdict
 import csv
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -20,6 +22,8 @@ PROJECTION_SIDE_BY_GROUP = {
     "LCA2": "left",
     "RCA": "right",
 }
+CADICA_PATIENT_ID_RE = re.compile(r"^p\d+$", re.IGNORECASE)
+CADICA_VIDEO_ID_RE = re.compile(r"^v\d+$", re.IGNORECASE)
 REVIEW_CATEGORY_DIRS = {
     "false_positive": "false_positive",
     "false_negative": "false_negative",
@@ -813,6 +817,9 @@ def _multiview_patient_id_from_path(result_path: Path, multiview_results_root: P
         relative_path = result_path.resolve().relative_to(multiview_results_root.resolve())
     except ValueError:
         relative_path = result_path
+    patient_id = _cadica_patient_id_from_parts(relative_path.parts)
+    if patient_id is not None:
+        return patient_id
     if len(relative_path.parts) >= 2:
         return relative_path.parts[0]
     return result_path.parent.name
@@ -1302,6 +1309,9 @@ def _candidate_patient_video_pairs(result_path: Path, frame_results_root: Path, 
         relative_path = result_path
 
     parts = relative_path.parts
+    patient_video_pair = _cadica_patient_video_from_parts(parts)
+    if patient_video_pair is not None:
+        pairs.add(patient_video_pair)
     if len(parts) >= 3:
         pairs.add((parts[0], parts[-2]))
 
@@ -1439,7 +1449,7 @@ def _load_temporal_prediction(
 ) -> tuple[bool | None, float | None]:
     if temporal_results_root is None:
         return None, None
-    temporal_path = temporal_results_root / patient_id / video_id / TEMPORAL_RESULT_FILENAME
+    temporal_path = _temporal_result_path(temporal_results_root, patient_id, video_id)
     if not temporal_path.is_file():
         return False, 0.0
     payload = _read_json_object(temporal_path)
@@ -1449,6 +1459,35 @@ def _load_temporal_prediction(
     degrees = final_lesion.get("degrees") if isinstance(final_lesion.get("degrees"), dict) else {}
     score = _optional_float(degrees.get("median")) or _optional_float(degrees.get("max")) or 1.0
     return True, score
+
+
+def _temporal_result_path(temporal_results_root: Path, patient_id: str, video_id: str) -> Path:
+    flat_path = temporal_results_root / patient_id / video_id / TEMPORAL_RESULT_FILENAME
+    if flat_path.is_file():
+        return flat_path
+    nested_path = _temporal_prediction_index(str(temporal_results_root.resolve())).get(
+        (patient_id.lower(), video_id.lower())
+    )
+    return flat_path if nested_path is None else nested_path
+
+
+@lru_cache(maxsize=16)
+def _temporal_prediction_index(temporal_results_root: str) -> dict[tuple[str, str], Path]:
+    root = Path(temporal_results_root)
+    index: dict[tuple[str, str], Path] = {}
+    for result_path in sorted(root.rglob(TEMPORAL_RESULT_FILENAME)):
+        if not result_path.is_file():
+            continue
+        try:
+            relative_parts = result_path.relative_to(root).parts
+        except ValueError:
+            relative_parts = result_path.parts
+        patient_video_pair = _cadica_patient_video_from_parts(relative_parts)
+        if patient_video_pair is None:
+            continue
+        patient_id, video_id = patient_video_pair
+        index.setdefault((patient_id.lower(), video_id.lower()), result_path)
+    return index
 
 
 def _resolve_video_label(rows: list[dict[str, Any]]) -> str:
@@ -1465,6 +1504,20 @@ def _frame_label_target(frame_label: str) -> bool | None:
         return True
     if frame_label == "negative":
         return False
+    return None
+
+
+def _cadica_patient_video_from_parts(parts: tuple[str, ...]) -> tuple[str, str] | None:
+    for index, part in enumerate(parts[:-1]):
+        if CADICA_PATIENT_ID_RE.fullmatch(part) and CADICA_VIDEO_ID_RE.fullmatch(parts[index + 1]):
+            return part, parts[index + 1]
+    return None
+
+
+def _cadica_patient_id_from_parts(parts: tuple[str, ...]) -> str | None:
+    for part in reversed(parts[:-1]):
+        if CADICA_PATIENT_ID_RE.fullmatch(part):
+            return part
     return None
 
 

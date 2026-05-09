@@ -80,9 +80,17 @@ class CadicaPreparationTests(unittest.TestCase):
             self.assertEqual(positive_row["prepared_image_name"], "slice_00001.png")
             self.assertEqual(positive_row["video_label"], "lesion")
             self.assertEqual(positive_row["frame_label"], "positive")
+            self.assertEqual(positive_row["projection_group"], "LCA")
+            self.assertEqual(json.loads(positive_row["projection_groups"]), ["LCA"])
+            self.assertEqual(positive_row["coronary_side"], "left")
+            self.assertEqual(positive_row["projection_status"], "known")
             self.assertEqual(positive_row["box_count"], "1")
             self.assertEqual(json.loads(positive_row["gt_boxes_json"])[0]["category"], "stenosis")
             self.assertEqual(row_by_video_frame[("v2", 1)]["frame_label"], "negative")
+            self.assertEqual(row_by_video_frame[("v2", 1)]["projection_group"], "unknown")
+            self.assertEqual(json.loads(row_by_video_frame[("v2", 1)]["projection_groups"]), [])
+            self.assertEqual(row_by_video_frame[("v2", 1)]["coronary_side"], "unknown")
+            self.assertEqual(row_by_video_frame[("v2", 1)]["projection_status"], "missing")
             self.assertEqual(row_by_video_frame[("v2", 2)]["frame_label"], "unknown")
 
             jsonl_rows = [

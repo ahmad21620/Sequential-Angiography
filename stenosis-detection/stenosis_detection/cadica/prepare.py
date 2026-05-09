@@ -38,6 +38,10 @@ MANIFEST_FIELDS = [
     "is_selected_frame",
     "video_label",
     "frame_label",
+    "projection_group",
+    "projection_groups",
+    "coronary_side",
+    "projection_status",
     "box_count",
     "gt_box_source_paths",
     "gt_boxes_json",
@@ -86,7 +90,13 @@ def prepare_cadica_for_pipeline(
         prepared_relative_path = Path("keyframes") / frame.patient_id / frame.video_id / frame.prepared_image_name
         prepared_path = resolved_output_root / prepared_relative_path
         _materialize_image(frame.original_image_path, prepared_path, copy_mode=copy_mode)
-        rows.append(_manifest_row(frame, prepared_relative_path))
+        rows.append(
+            _manifest_row(
+                frame,
+                prepared_relative_path,
+                _projection_info_for_video(frame.patient_id, frame.video_id, projection_info_by_video_key),
+            )
+        )
         frames_by_patient_video[(frame.patient_id, frame.video_id)].append(frame)
 
     manifest_csv = resolved_output_root / "manifest.csv"
@@ -209,7 +219,11 @@ def _materialize_image(source_path: Path, prepared_path: Path, *, copy_mode: str
         raise ValueError(f"Unsupported copy mode: {copy_mode}")
 
 
-def _manifest_row(frame: CadicaFrame, prepared_relative_path: Path) -> dict[str, Any]:
+def _manifest_row(
+    frame: CadicaFrame,
+    prepared_relative_path: Path,
+    projection_info: CadicaProjectionInfo,
+) -> dict[str, Any]:
     return {
         "patient_id": frame.patient_id,
         "video_id": frame.video_id,
@@ -221,6 +235,7 @@ def _manifest_row(frame: CadicaFrame, prepared_relative_path: Path) -> dict[str,
         "is_selected_frame": frame.is_selected_frame,
         "video_label": frame.video_label,
         "frame_label": frame.frame_label,
+        **projection_info.to_dict(),
         "box_count": len(frame.boxes),
         "gt_box_source_paths": sorted({str(box.source_path) for box in frame.boxes}),
         "gt_boxes_json": json.dumps([_box_to_dict(box) for box in frame.boxes], sort_keys=True),
