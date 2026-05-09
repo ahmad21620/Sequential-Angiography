@@ -104,6 +104,8 @@ class _MultiviewVariant:
     temporal_prefix: tuple[str, ...]
     root: Path
     result_paths: tuple[Path, ...]
+    indexed_keys: tuple[dict[str, Any], ...]
+    skipped_files: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,13 +682,22 @@ def _discover_multiview_variants(
         temporal_keys = {(variant.prefix, ()) for variant in frame_variants}
 
     paths_by_key: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[Path]] = {}
+    indexed_by_key: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
+    skipped_by_key: dict[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
     for path in multiview_paths:
-        raw_prefix = _prefix_before_patient_video(path, multiview_results_root)
-        frame_prefix, temporal_prefix, multiview_prefix = _split_multiview_prefix(
-            raw_prefix,
+        parsed_path = _parse_multiview_result_path(
+            path,
+            multiview_results_root,
             frame_prefixes=frame_prefixes,
             temporal_keys=temporal_keys,
         )
+        if parsed_path.get("skip_reason"):
+            skipped_by_key.setdefault(((), (), ()), []).append(parsed_path)
+            continue
+        frame_prefix = tuple(parsed_path["frame_prefix"])
+        temporal_prefix = tuple(parsed_path["temporal_prefix"])
+        multiview_prefix = tuple(parsed_path["multiview_prefix"])
+        indexed_by_key.setdefault((frame_prefix, temporal_prefix, multiview_prefix), []).append(parsed_path)
         paths_by_key.setdefault((frame_prefix, temporal_prefix, multiview_prefix), []).append(path)
 
     variants: list[_MultiviewVariant] = []
@@ -694,7 +705,8 @@ def _discover_multiview_variants(
         paths_by_key.items(),
         key=lambda item: (_variant_name(item[0][0]), _variant_name(item[0][1]), _variant_name(item[0][2])),
     ):
-        root = _variant_root(multiview_results_root, (*frame_prefix, *temporal_prefix, *multiview_prefix))
+        indexed_keys = indexed_by_key.get((frame_prefix, temporal_prefix, multiview_prefix), [])
+        root = Path(indexed_keys[0]["variant_root"]) if indexed_keys else _variant_root(multiview_results_root, (*frame_prefix, *temporal_prefix, *multiview_prefix))
         variants.append(
             _MultiviewVariant(
                 name=_variant_name(multiview_prefix),
@@ -703,6 +715,21 @@ def _discover_multiview_variants(
                 temporal_prefix=temporal_prefix,
                 root=root,
                 result_paths=tuple(paths),
+                indexed_keys=tuple(indexed_keys),
+                skipped_files=tuple(skipped_by_key.get((frame_prefix, temporal_prefix, multiview_prefix), [])),
+            )
+        )
+    if skipped_by_key.get(((), (), ())) and not variants:
+        variants.append(
+            _MultiviewVariant(
+                name="flat",
+                prefix=(),
+                frame_prefix=(),
+                temporal_prefix=(),
+                root=multiview_results_root,
+                result_paths=(),
+                indexed_keys=(),
+                skipped_files=tuple(skipped_by_key[((), (), ())]),
             )
         )
     return variants
@@ -860,6 +887,86 @@ def _split_temporal_prefix(
     if () in frame_prefixes:
         return (), raw_prefix
     return raw_prefix[:-1], raw_prefix[-1:]
+
+
+def _parse_multiview_result_path(
+    path: Path,
+    root: Path,
+    *,
+    frame_prefixes: set[tuple[str, ...]],
+    temporal_keys: set[tuple[tuple[str, ...], tuple[str, ...]]],
+) -> dict[str, Any]:
+    parts = _relative_parts(path, root)
+    patient_index = _cadica_patient_index(parts)
+    if patient_index is None:
+        return {
+            "skip_reason": "missing_patient_id",
+            "relative_path": _display_relative_path(path, root),
+        }
+
+    patient_id = parts[patient_index]
+    raw_prefix = tuple(parts[:patient_index])
+    if raw_prefix:
+        frame_prefix, temporal_prefix, multiview_prefix = _split_multiview_prefix(
+            raw_prefix,
+            frame_prefixes=frame_prefixes,
+            temporal_keys=temporal_keys,
+        )
+        variant_root = _variant_root(root, (*frame_prefix, *temporal_prefix, *multiview_prefix))
+    else:
+        inferred = _infer_multiview_leaf_root_prefix(root, frame_prefixes=frame_prefixes, temporal_keys=temporal_keys)
+        if inferred is None:
+            frame_prefix, temporal_prefix, multiview_prefix = (), (), ()
+        else:
+            frame_prefix, temporal_prefix = inferred
+            multiview_prefix = ()
+        variant_root = root
+
+    if temporal_keys and (frame_prefix, temporal_prefix) not in temporal_keys:
+        return {
+            "skip_reason": "no_matching_frame_temporal_experiment",
+            "frame_variant": _variant_name(frame_prefix),
+            "temporal_variant": _variant_name(temporal_prefix),
+            "patient_id": patient_id,
+            "relative_path": _display_relative_path(path, root),
+        }
+
+    return {
+        "frame_prefix": frame_prefix,
+        "temporal_prefix": temporal_prefix,
+        "multiview_prefix": multiview_prefix,
+        "frame_variant": _variant_name(frame_prefix),
+        "temporal_variant": _variant_name(temporal_prefix),
+        "multiview_variant": _variant_name(multiview_prefix),
+        "patient_id": patient_id,
+        "relative_path": _display_relative_path(path, root),
+        "variant_root": str(variant_root),
+        "skip_reason": "",
+    }
+
+
+def _cadica_patient_index(parts: tuple[str, ...]) -> int | None:
+    for index, part in enumerate(parts[:-1]):
+        if CADICA_PATIENT_ID_RE.fullmatch(part):
+            return index
+    return None
+
+
+def _infer_multiview_leaf_root_prefix(
+    root: Path,
+    *,
+    frame_prefixes: set[tuple[str, ...]],
+    temporal_keys: set[tuple[tuple[str, ...], tuple[str, ...]]],
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    root_parts = root.resolve().parts
+    candidates = sorted(temporal_keys, key=lambda item: len(item[0]) + len(item[1]), reverse=True)
+    for frame_prefix, temporal_prefix in candidates:
+        combined = (*frame_prefix, *temporal_prefix)
+        if combined and len(combined) <= len(root_parts) and tuple(root_parts[-len(combined):]) == combined:
+            return frame_prefix, temporal_prefix
+    if len(frame_prefixes) == 1 and len(temporal_keys) == 1:
+        return next(iter(temporal_keys))
+    return None
 
 
 def _split_multiview_prefix(
@@ -1215,6 +1322,14 @@ def _build_cadica_sweep_diagnostics(
         experiments=experiments,
         skipped_combinations=skipped_combinations,
     )
+    multiview_summary = _summarize_multiview_index(
+        multiview_paths=multiview_paths,
+        multiview_results_root=multiview_results_root,
+        frame_variants=frame_variants,
+        temporal_variants=temporal_variants,
+        multiview_variants=multiview_variants,
+        experiments=experiments,
+    )
     return {
         "variant_counts": {
             "frame_variants_found": len(frame_variants),
@@ -1246,6 +1361,7 @@ def _build_cadica_sweep_diagnostics(
         },
         "temporal_results": temporal_summary,
         "multiview_results": {
+            **multiview_summary,
             "json_file_count": len(multiview_paths),
             "variant_count": len(multiview_variants),
             "per_variant": {
@@ -1384,6 +1500,73 @@ def _manifest_matching_by_variant(
             evaluate_matched_frames_only=evaluate_matched_frames_only,
         )
     return summaries
+
+
+def _summarize_multiview_index(
+    *,
+    multiview_paths: list[Path],
+    multiview_results_root: Path | None,
+    frame_variants: list[_FrameVariant],
+    temporal_variants: list[_TemporalVariant],
+    multiview_variants: list[_MultiviewVariant],
+    experiments: list[_ExperimentVariant],
+) -> dict[str, Any]:
+    frame_prefixes = {variant.prefix for variant in frame_variants}
+    temporal_keys = {(variant.frame_prefix, variant.prefix) for variant in temporal_variants}
+    if not temporal_keys:
+        temporal_keys = {(variant.prefix, ()) for variant in frame_variants}
+
+    indexed_examples: list[dict[str, Any]] = []
+    skipped_examples: list[dict[str, Any]] = []
+    indexed_experiments: set[tuple[str, str]] = set()
+    indexed_patients: set[tuple[str, str, str]] = set()
+    if multiview_results_root is not None:
+        for path in multiview_paths:
+            parsed = _parse_multiview_result_path(
+                path,
+                multiview_results_root,
+                frame_prefixes=frame_prefixes,
+                temporal_keys=temporal_keys,
+            )
+            if parsed.get("skip_reason"):
+                if len(skipped_examples) < 10:
+                    skipped_examples.append(parsed)
+                continue
+            frame_variant = str(parsed["frame_variant"])
+            temporal_variant = str(parsed["temporal_variant"])
+            patient_id = str(parsed["patient_id"])
+            indexed_experiments.add((frame_variant, temporal_variant))
+            indexed_patients.add((frame_variant, temporal_variant, patient_id))
+            if len(indexed_examples) < 10:
+                indexed_examples.append(
+                    {
+                        "frame_variant": frame_variant,
+                        "temporal_variant": temporal_variant,
+                        "patient_id": patient_id,
+                        "relative_path": parsed["relative_path"],
+                    }
+                )
+
+    missing_examples = [
+        {
+            "frame_variant": experiment.frame_variant,
+            "temporal_variant": experiment.temporal_variant,
+        }
+        for experiment in experiments
+        if not experiment.multiview_result_paths
+    ][:10]
+    return {
+        "multiview_results_root": None if multiview_results_root is None else str(multiview_results_root),
+        "multiview_json_file_count": len(multiview_paths),
+        "multiview_variant_roots_found": len([variant for variant in multiview_variants if variant.result_paths]),
+        "multiview_indexed_experiment_count": len(indexed_experiments),
+        "multiview_indexed_patient_count": len(indexed_patients),
+        "indexed_multiview_key_examples": indexed_examples,
+        "skipped_multiview_file_examples": skipped_examples,
+        "frame_temporal_experiment_count": len(experiments),
+        "valid_full_experiment_combinations": sum(1 for experiment in experiments if experiment.multiview_result_paths),
+        "missing_multiview_for_experiment_examples": missing_examples,
+    }
 
 
 def _summarize_temporal_results_by_variant(

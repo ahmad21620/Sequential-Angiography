@@ -571,6 +571,128 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             self.assertEqual(int(rows[0.5]["multiview_patient_TP"]), 1)
             self.assertEqual(int(rows[0.5]["multiview_patient_FN"]), 1)
 
+    def test_variant_aware_multiview_paths_match_frame_and_temporal_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            temporal_results_root = temp_root / "temporal_results"
+            multiview_results_root = temp_root / "multiview_results"
+            output_root = temp_root / "sweep"
+            frame_a = "frame_a"
+            frame_b = "frame_b"
+            temporal_a = "temporal_a"
+            temporal_b = "temporal_b"
+
+            self._write_variant_multiview_manifest_and_predictions(
+                manifest_path=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                frame_temporal_pairs=[(frame_a, temporal_a), (frame_b, temporal_a), (frame_a, temporal_b)],
+            )
+            self._write_multiview_result(
+                multiview_results_root / frame_a / temporal_a / "p1" / "case_multiview_fusion.json",
+                side_scores={"left": 0.9},
+            )
+            self._write_multiview_result(
+                multiview_results_root / frame_a / temporal_a / "p2" / "case_multiview_fusion.json",
+                side_scores={"right": None},
+            )
+
+            outputs = run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                multiview_results_root=multiview_results_root,
+                output_root=output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+                video_prediction_sources=["temporal_final"],
+                multiview_min_scores=[0.5],
+            )
+
+            diagnostics = json.loads(outputs["cadica_benchmark_diagnostics_json"].read_text(encoding="utf-8"))
+            multiview_diagnostics = diagnostics["multiview_results"]
+            self.assertEqual(multiview_diagnostics["multiview_json_file_count"], 2)
+            self.assertEqual(multiview_diagnostics["multiview_indexed_experiment_count"], 1)
+            self.assertEqual(multiview_diagnostics["multiview_indexed_patient_count"], 2)
+            self.assertEqual(multiview_diagnostics["valid_full_experiment_combinations"], 1)
+            self.assertEqual(diagnostics["variant_counts"]["valid_full_experiment_combinations"], 1)
+            self.assertEqual(
+                {
+                    (
+                        example["frame_variant"],
+                        example["temporal_variant"],
+                        example["patient_id"],
+                    )
+                    for example in multiview_diagnostics["indexed_multiview_key_examples"]
+                },
+                {(frame_a, temporal_a, "p1"), (frame_a, temporal_a, "p2")},
+            )
+
+            rows = {
+                (row["frame_variant"], row["temporal_variant"]): row
+                for row in self._read_csv(output_root / "cadica_threshold_sweep.csv")
+            }
+            self.assertNotEqual(rows[(frame_a, temporal_a)]["multiview_side_F1"], "")
+            self.assertEqual(rows[(frame_a, temporal_a)]["multiview_side_F1"], "1.0")
+            self.assertEqual(rows[(frame_b, temporal_a)]["multiview_side_F1"], "")
+            self.assertEqual(rows[(frame_a, temporal_b)]["multiview_side_F1"], "")
+
+            progression_rows = {
+                (row["frame_variant"], row["temporal_variant"]): row
+                for row in self._read_csv(output_root / "stage_progression.csv")
+            }
+            self.assertEqual(progression_rows[(frame_a, temporal_a)]["multiview_side_f1"], "1.0")
+            self.assertEqual(progression_rows[(frame_b, temporal_a)]["multiview_side_f1"], "")
+            self.assertEqual(progression_rows[(frame_a, temporal_b)]["multiview_side_f1"], "")
+
+    def test_variant_aware_multiview_leaf_root_layout_still_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            manifest_path = temp_root / "manifest.csv"
+            frame_results_root = temp_root / "frame_results"
+            temporal_results_root = temp_root / "temporal_results"
+            multiview_results_root = temp_root / "multiview_results"
+            output_root = temp_root / "sweep"
+            frame_a = "frame_a"
+            temporal_a = "temporal_a"
+            leaf_multiview_root = multiview_results_root / frame_a / temporal_a
+
+            self._write_variant_multiview_manifest_and_predictions(
+                manifest_path=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                frame_temporal_pairs=[(frame_a, temporal_a)],
+            )
+            self._write_multiview_result(
+                leaf_multiview_root / "p1" / "case_multiview_fusion.json",
+                side_scores={"left": 0.9},
+            )
+            self._write_multiview_result(
+                leaf_multiview_root / "p2" / "case_multiview_fusion.json",
+                side_scores={"right": None},
+            )
+
+            outputs = run_cadica_threshold_sweep(
+                manifest=manifest_path,
+                frame_results_root=frame_results_root,
+                temporal_results_root=temporal_results_root,
+                multiview_results_root=leaf_multiview_root,
+                output_root=output_root,
+                frame_min_degrees=[0.5],
+                box_margins_px=[0.0],
+                video_prediction_sources=["temporal_final"],
+                multiview_min_scores=[0.5],
+            )
+
+            diagnostics = json.loads(outputs["cadica_benchmark_diagnostics_json"].read_text(encoding="utf-8"))
+            row = self._read_csv(output_root / "cadica_threshold_sweep.csv")[0]
+            self.assertEqual(diagnostics["multiview_results"]["valid_full_experiment_combinations"], 1)
+            self.assertEqual(diagnostics["multiview_results"]["indexed_multiview_key_examples"][0]["frame_variant"], frame_a)
+            self.assertEqual(diagnostics["multiview_results"]["indexed_multiview_key_examples"][0]["temporal_variant"], temporal_a)
+            self.assertNotEqual(row["multiview_side_F1"], "")
+
     def _write_synthetic_dataset(self, root: Path) -> tuple[Path, Path]:
         manifest_path = root / "manifest.csv"
         frame_results_root = root / "frame_results"
@@ -686,6 +808,66 @@ class CadicaThresholdSweepTests(unittest.TestCase):
             side_scores={"left": None},
         )
         return manifest_path, frame_results_root, multiview_results_root
+
+    def _write_variant_multiview_manifest_and_predictions(
+        self,
+        *,
+        manifest_path: Path,
+        frame_results_root: Path,
+        temporal_results_root: Path,
+        frame_temporal_pairs: list[tuple[str, str]],
+    ) -> None:
+        rows = [
+            self._manifest_row(
+                "p1",
+                "v1",
+                1,
+                "lesion",
+                "positive",
+                [{"x": 10, "y": 10, "w": 10, "h": 10, "category": "stenosis", "source_path": "gt/p1.txt"}],
+                coronary_side="left",
+                projection_group="LCA",
+            ),
+            self._manifest_row(
+                "p2",
+                "v1",
+                1,
+                "nonlesion",
+                "negative",
+                [],
+                coronary_side="right",
+                projection_group="RCA",
+            ),
+        ]
+        self._write_manifest_rows(manifest_path, rows)
+        for frame_variant in sorted({pair[0] for pair in frame_temporal_pairs}):
+            self._write_frame_result(
+                frame_results_root / frame_variant / "p1" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p1",
+                video_id="v1",
+                frame_id=1,
+                points=[{"x": 15, "y": 15, "degree": 0.7, "severity": "moderate"}],
+            )
+            self._write_frame_result(
+                frame_results_root / frame_variant / "p2" / "v1" / "slice_00001_stenosis_results.json",
+                patient_id="p2",
+                video_id="v1",
+                frame_id=1,
+                points=[],
+            )
+        for frame_variant, temporal_variant in frame_temporal_pairs:
+            self._write_temporal_result(
+                temporal_results_root / frame_variant / temporal_variant / "p1" / "v1" / "view_temporal_fusion.json",
+                patient_id="p1",
+                video_id="v1",
+                positive=True,
+            )
+            self._write_temporal_result(
+                temporal_results_root / frame_variant / temporal_variant / "p2" / "v1" / "view_temporal_fusion.json",
+                patient_id="p2",
+                video_id="v1",
+                positive=False,
+            )
 
     def _write_manifest_rows(self, path: Path, rows: list[dict[str, object]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
