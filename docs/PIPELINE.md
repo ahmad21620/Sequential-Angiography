@@ -163,6 +163,10 @@ From the repository root:
 python scripts/run_keyframes.py data/raw_cases --output-root work/keyframes --backend cpu --overwrite
 ```
 
+The default `--window-mode centered` keeps the detected contrast peak centered
+as much as possible. Use `--window-mode leading --limit 8` to keep the 8 frames
+leading up to and including the peak.
+
 Equivalent command from the subproject folder:
 
 ```bash

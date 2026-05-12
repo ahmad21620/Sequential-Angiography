@@ -32,7 +32,7 @@ The extraction rule follows one temporal scoring pipeline per sequence:
 4. Build a pre-contrast baseline from the first `N` enhanced frames using a pixelwise median.
 5. Score every frame by subtracting that baseline from the enhanced frame, clamping negative values to `0`, and taking the mean response.
 6. Smooth the score curve over time with a centered moving average.
-7. Find the strongest smoothed peak and keep one contiguous `limit`-frame window centered around it as much as possible.
+7. Find the strongest smoothed peak and keep one contiguous `limit`-frame window around it. The default `centered` mode keeps the peak centered as much as possible; `leading` mode ends the window at the peak.
 8. Save the original grayscale keyframes into a mirrored output tree in temporal order, without copying the original `frames` directories.
 
 The default is `6` keyframes per sequence, the default baseline uses the first `3` frames, and the default smoothing window is `5`. If a sequence is shorter than the baseline or output window, the available frames are used.
@@ -82,6 +82,12 @@ CUDA example:
 angio-keyframes data/raw_cases --backend cuda --output-root work/keyframes_cuda --overwrite
 ```
 
+Leading-window example, useful for the initial contrast-flow phase before maximum vessel filling:
+
+```bash
+python scripts/run_keyframes.py data/raw_cases --limit 8 --window-mode leading --backend cpu --output-root work/keyframes_leading --overwrite
+```
+
 CADICA example, run from the repository root:
 
 ```bash
@@ -101,6 +107,7 @@ its `pX_vY_selectedFrames.txt` reference. Without that flag, the original fixed
 Useful flags:
 
 - `--limit 8`: keep a different number of keyframes.
+- `--window-mode centered|leading`: choose whether the peak is centered in the output window or the final frame of the output window. Default: `centered`.
 - `--baseline-frames 5`: use the first 5 frames to build the pre-contrast baseline.
 - `--smoothing-window 7`: use a larger odd centered moving-average window for score smoothing.
 - `--backend cuda`: run the heavy image-processing path on a CUDA-capable OpenCV build.

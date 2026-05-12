@@ -15,6 +15,7 @@ VALUE_OPTIONS = {
     "--limit",
     "--baseline-frames",
     "--smoothing-window",
+    "--window-mode",
     "--workers",
     "--backend",
     "--output-root",

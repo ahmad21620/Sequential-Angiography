@@ -168,6 +168,36 @@ class PipelineTests(unittest.TestCase):
             "frame_00005.png",
         ])
 
+    def test_select_keyframe_window_centered_mode_preserves_even_window_behavior(self) -> None:
+        candidates = make_candidates([0.0] * 20 + [10.0] + [0.0] * 4)
+
+        selected = select_keyframe_window(
+            candidates,
+            limit=8,
+            smoothing_window=1,
+            window_mode="centered",
+        )
+
+        self.assertEqual(
+            [candidate.frame_index for candidate in selected],
+            [16, 17, 18, 19, 20, 21, 22, 23],
+        )
+
+    def test_select_keyframe_window_leading_mode_ends_at_peak(self) -> None:
+        candidates = make_candidates([0.0] * 20 + [10.0] + [0.0] * 4)
+
+        selected = select_keyframe_window(
+            candidates,
+            limit=8,
+            smoothing_window=1,
+            window_mode="leading",
+        )
+
+        self.assertEqual(
+            [candidate.frame_index for candidate in selected],
+            [13, 14, 15, 16, 17, 18, 19, 20],
+        )
+
     def test_select_keyframe_window_returns_all_frames_for_short_sequence(self) -> None:
         candidates = make_candidates([1.0, 3.0, 5.0])
 
@@ -191,6 +221,18 @@ class PipelineTests(unittest.TestCase):
             "frame_00003.png",
         ])
 
+    def test_select_keyframe_window_leading_mode_shifts_forward_near_start(self) -> None:
+        candidates = make_candidates([1.0, 10.0, 3.0, 1.0, 0.0])
+
+        selected = select_keyframe_window(
+            candidates,
+            limit=4,
+            smoothing_window=1,
+            window_mode="leading",
+        )
+
+        self.assertEqual([candidate.frame_index for candidate in selected], [0, 1, 2, 3])
+
     def test_select_keyframe_window_clips_near_end(self) -> None:
         candidates = make_candidates([0.0, 1.0, 3.0, 9.0, 10.0])
 
@@ -202,6 +244,30 @@ class PipelineTests(unittest.TestCase):
             "frame_00003.png",
             "frame_00004.png",
         ])
+
+    def test_select_keyframe_window_leading_mode_handles_peak_near_end(self) -> None:
+        candidates = make_candidates([0.0, 1.0, 3.0, 9.0, 10.0])
+
+        selected = select_keyframe_window(
+            candidates,
+            limit=4,
+            smoothing_window=1,
+            window_mode="leading",
+        )
+
+        self.assertEqual([candidate.frame_index for candidate in selected], [1, 2, 3, 4])
+
+    def test_select_keyframe_window_leading_mode_returns_all_frames_for_short_sequence(self) -> None:
+        candidates = make_candidates([1.0, 3.0, 5.0])
+
+        selected = select_keyframe_window(
+            candidates,
+            limit=5,
+            smoothing_window=1,
+            window_mode="leading",
+        )
+
+        self.assertEqual([candidate.frame_index for candidate in selected], [0, 1, 2])
 
     def test_select_keyframe_window_uses_earliest_peak_on_tie(self) -> None:
         candidates = make_candidates([0.0, 10.0, 0.0, 10.0, 0.0])

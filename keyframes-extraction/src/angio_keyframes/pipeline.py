@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import shutil
 import sys
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -21,7 +22,9 @@ from angio_keyframes.discovery import discover_frame_directories
 from angio_keyframes.images import list_image_files, load_grayscale_image, write_grayscale_image
 from angio_keyframes.models import ExtractionResult, KeyframeCandidate
 
-ExtractionJob = tuple[BackendName, Path, Path, int, int, int, bool, bool]
+WindowMode = Literal["centered", "leading"]
+WINDOW_MODE_CHOICES: tuple[WindowMode, WindowMode] = ("centered", "leading")
+ExtractionJob = tuple[BackendName, Path, Path, int, int, int, WindowMode, bool, bool]
 PATIENT_METADATA_FILENAMES = ("views.json", "patient.json")
 
 
@@ -47,9 +50,12 @@ def select_keyframe_window(
     candidates: list[KeyframeCandidate],
     limit: int,
     smoothing_window: int,
+    window_mode: WindowMode = "centered",
 ) -> list[KeyframeCandidate]:
     if limit <= 0:
         raise ValueError("limit must be greater than 0.")
+    if window_mode not in WINDOW_MODE_CHOICES:
+        raise ValueError(f"Unsupported window mode: {window_mode}")
     if not candidates:
         return []
 
@@ -58,12 +64,33 @@ def select_keyframe_window(
     smoothed_scores = smooth_score_curve(scores, smoothing_window)
     peak_index = int(np.argmax(smoothed_scores))
 
-    start_index = peak_index - (window_size // 2)
-    start_index = max(0, start_index)
-    start_index = min(start_index, len(candidates) - window_size)
+    start_index = _resolve_window_start_index(
+        peak_index=peak_index,
+        window_size=window_size,
+        sequence_length=len(candidates),
+        window_mode=window_mode,
+    )
     end_index = start_index + window_size
 
     return candidates[start_index:end_index]
+
+
+def _resolve_window_start_index(
+    *,
+    peak_index: int,
+    window_size: int,
+    sequence_length: int,
+    window_mode: WindowMode,
+) -> int:
+    if window_mode == "centered":
+        start_index = peak_index - (window_size // 2)
+    elif window_mode == "leading":
+        start_index = peak_index - window_size + 1
+    else:
+        raise ValueError(f"Unsupported window mode: {window_mode}")
+
+    start_index = max(0, start_index)
+    return min(start_index, sequence_length - window_size)
 
 
 def resolve_output_root(input_path: Path, output_root: Path | None) -> Path:
@@ -135,6 +162,7 @@ def _extract_keyframes_job(
         limit,
         baseline_frames,
         smoothing_window,
+        window_mode,
         overwrite,
         skip_existing,
     ) = job
@@ -144,6 +172,7 @@ def _extract_keyframes_job(
         limit=limit,
         baseline_frames=baseline_frames,
         smoothing_window=smoothing_window,
+        window_mode=window_mode,
         backend=backend_name,
         overwrite=overwrite,
         skip_existing=skip_existing,
@@ -157,13 +186,14 @@ def _extract_keyframes_with_backend(
     limit: int = 6,
     baseline_frames: int = 3,
     smoothing_window: int = 5,
+    window_mode: WindowMode = "centered",
     overwrite: bool = False,
 ) -> ExtractionResult:
     candidates = scoring_backend.score_frame_directory(frames_dir, baseline_frames=baseline_frames)
     if not candidates:
         raise ValueError(f"No supported image files found in: {frames_dir}")
 
-    selected = select_keyframe_window(candidates, limit, smoothing_window)
+    selected = select_keyframe_window(candidates, limit, smoothing_window, window_mode)
     write_keyframes(selected, output_dir, overwrite)
 
     return ExtractionResult(
@@ -194,6 +224,7 @@ def extract_keyframes_from_root(
     workers: int = 1,
     backend: BackendName = "cpu",
     frames_dirname: str = "frames",
+    window_mode: WindowMode = "centered",
     overwrite: bool = False,
     skip_existing: bool = False,
     cadica_selected_frame_counts: bool = False,
@@ -202,6 +233,8 @@ def extract_keyframes_from_root(
         raise ValueError("workers must be greater than 0.")
     if backend not in BACKEND_CHOICES:
         raise ValueError(f"Unsupported backend: {backend}")
+    if window_mode not in WINDOW_MODE_CHOICES:
+        raise ValueError(f"Unsupported window mode: {window_mode}")
     if overwrite and skip_existing:
         raise ValueError("overwrite and skip_existing cannot both be enabled.")
     if backend != "cpu" and workers != 1:
@@ -240,6 +273,7 @@ def extract_keyframes_from_root(
             ),
             baseline_frames,
             smoothing_window,
+            window_mode,
             overwrite,
             skip_existing,
         )
@@ -247,7 +281,7 @@ def extract_keyframes_from_root(
     ]
 
     if not overwrite and not skip_existing:
-        for _, _, output_dir, _, _, _, _, _ in jobs:
+        for _, _, output_dir, _, _, _, _, _, _ in jobs:
             if output_dir.exists():
                 raise FileExistsError(
                     f"Output directory already exists: {output_dir}. "
@@ -265,7 +299,7 @@ def extract_keyframes_from_root(
         disable=not sys.stderr.isatty(),
     ) as progress:
         for index, job in enumerate(jobs):
-            _, frames_dir, output_dir, _, _, _, _, job_skip_existing = job
+            _, frames_dir, output_dir, _, _, _, _, _, job_skip_existing = job
             if job_skip_existing and output_dir.exists():
                 results[index] = build_skipped_result(frames_dir, output_dir)
                 progress.update(1)
@@ -283,6 +317,7 @@ def extract_keyframes_from_root(
                     job_limit,
                     job_baseline_frames,
                     job_smoothing_window,
+                    job_window_mode,
                     job_overwrite,
                     _job_skip_existing,
                 ) = job
@@ -296,6 +331,7 @@ def extract_keyframes_from_root(
                     limit=job_limit,
                     baseline_frames=job_baseline_frames,
                     smoothing_window=job_smoothing_window,
+                    window_mode=job_window_mode,
                     overwrite=job_overwrite,
                 )
                 progress.update(1)
@@ -321,11 +357,14 @@ def extract_keyframes_from_directory(
     baseline_frames: int = 3,
     smoothing_window: int = 5,
     backend: BackendName = "cpu",
+    window_mode: WindowMode = "centered",
     overwrite: bool = False,
     skip_existing: bool = False,
 ) -> ExtractionResult:
     if backend not in BACKEND_CHOICES:
         raise ValueError(f"Unsupported backend: {backend}")
+    if window_mode not in WINDOW_MODE_CHOICES:
+        raise ValueError(f"Unsupported window mode: {window_mode}")
     if overwrite and skip_existing:
         raise ValueError("overwrite and skip_existing cannot both be enabled.")
     if skip_existing and output_dir.exists():
@@ -338,6 +377,7 @@ def extract_keyframes_from_directory(
         limit=limit,
         baseline_frames=baseline_frames,
         smoothing_window=smoothing_window,
+        window_mode=window_mode,
         overwrite=overwrite,
     )
 

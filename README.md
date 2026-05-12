@@ -98,6 +98,9 @@ The root `scripts/` wrappers run from the repository root and forward arguments 
 python scripts/run_keyframes.py data/raw_cases --output-root work/keyframes --backend cpu --overwrite
 ```
 
+Use `--window-mode leading --limit 8` to select the 8-frame window that ends at
+the detected contrast peak instead of the default centered window.
+
 Subproject command:
 
 ```bash

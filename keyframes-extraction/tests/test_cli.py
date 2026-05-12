@@ -34,6 +34,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(extract.call_args.kwargs["input_path"], input_root)
             self.assertEqual(extract.call_args.kwargs["output_root"], output_root)
             self.assertEqual(extract.call_args.kwargs["frames_dirname"], "frames")
+            self.assertEqual(extract.call_args.kwargs["window_mode"], "centered")
             self.assertFalse(extract.call_args.kwargs["cadica_selected_frame_counts"])
 
     def test_named_input_root_is_passed_to_extraction(self) -> None:
@@ -59,6 +60,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(extract.call_args.kwargs["output_root"], output_root)
             self.assertEqual(extract.call_args.kwargs["frames_dirname"], "input")
             self.assertTrue(extract.call_args.kwargs["cadica_selected_frame_counts"])
+
+    def test_window_mode_is_passed_to_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_root = Path(temp_dir) / "dataset"
+            output_root = Path(temp_dir) / "keyframes"
+
+            with patch("angio_keyframes.cli.extract_keyframes_from_root", return_value=[]) as extract:
+                exit_code = main(
+                    [
+                        str(input_root),
+                        "--output-root",
+                        str(output_root),
+                        "--window-mode",
+                        "leading",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(extract.call_args.kwargs["window_mode"], "leading")
 
     def test_cadica_selected_frame_counts_default_to_input_frames_dirname(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

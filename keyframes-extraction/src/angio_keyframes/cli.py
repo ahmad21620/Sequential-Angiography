@@ -6,7 +6,7 @@ from typing import Sequence
 
 from angio_keyframes.backends import BACKEND_CHOICES
 from angio_keyframes.cadica import CADICA_INPUT_FRAMES_DIRNAME
-from angio_keyframes.pipeline import extract_keyframes_from_root
+from angio_keyframes.pipeline import WINDOW_MODE_CHOICES, extract_keyframes_from_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Odd centered moving-average window used to smooth frame scores over time. "
             "Default: 5."
+        ),
+    )
+    parser.add_argument(
+        "--window-mode",
+        choices=WINDOW_MODE_CHOICES,
+        default="centered",
+        help=(
+            "How to place the limit-frame window around the detected peak: "
+            "centered keeps the peak centered as much as possible; leading ends the window at the peak. "
+            "Default: centered."
         ),
     )
     parser.add_argument(
@@ -113,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             baseline_frames=args.baseline_frames,
             smoothing_window=args.smoothing_window,
+            window_mode=args.window_mode,
             workers=args.workers,
             backend=args.backend,
             frames_dirname=frames_dirname,
